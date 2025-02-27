@@ -12,7 +12,7 @@ kubectl-ai is a kubernetes assistant that enhances the Kubernetes command-line e
 
 - Go 1.23 or later
 - kubectl installed and configured
-- Access to an Gemini API (other supported model)
+- Access to a Gemini API Key (or other supported AI models)
 
 ### Install from Source
 
@@ -45,6 +45,14 @@ Simply provide your query as a positional argument:
 
 ```bash
 kubectl-ai "your natural language query"
+```
+
+You can also pipe content to kubectl-ai using the special "-" argument:
+
+```bash
+echo "list all pods in the default namespace" | kubectl-ai -
+# OR
+cat query.txt | kubectl-ai -
 ```
 
 ### Interactive Shell

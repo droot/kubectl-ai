@@ -90,9 +90,30 @@ func run(ctx context.Context) error {
 	// Check for positional arguments (after all flags are parsed)
 	args := flag.Args()
 	var queryFromCmd string
-	if len(args) > 0 {
-		// Use the first positional argument as the query
-		queryFromCmd = args[0]
+
+	// Handle positional arguments
+	if len(args) > 1 {
+		return fmt.Errorf("only one positional argument (query) is allowed")
+	} else if len(args) == 1 {
+		if args[0] == "-" {
+			// Read query from stdin
+			scanner := bufio.NewScanner(os.Stdin)
+			var queryBuilder strings.Builder
+			for scanner.Scan() {
+				queryBuilder.WriteString(scanner.Text())
+				queryBuilder.WriteString("\n")
+			}
+			if err := scanner.Err(); err != nil {
+				return fmt.Errorf("error reading from stdin: %w", err)
+			}
+			queryFromCmd = strings.TrimSpace(queryBuilder.String())
+			if queryFromCmd == "" {
+				return fmt.Errorf("no query provided from stdin")
+			}
+		} else {
+			// Use the positional argument as the query
+			queryFromCmd = args[0]
+		}
 	}
 
 	mdRenderer, err := glamour.NewTermRenderer(
