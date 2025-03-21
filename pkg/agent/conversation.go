@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package chatbased
+package agent
 
 import (
 	"context"
@@ -32,8 +32,8 @@ import (
 	"k8s.io/klog/v2"
 )
 
-//go:embed chatbased_systemprompt_template_default.txt
-var defaultSystemPromptChatAgent string
+//go:embed systemprompt_template_default.txt
+var defaultSystemPromptTemplate string
 
 type Conversation struct {
 	LLM gollm.Client
@@ -73,13 +73,12 @@ func (s *Conversation) Init(ctx context.Context, u ui.UI) error {
 
 	log.Info("Created temporary working directory", "workDir", workDir)
 
-	systemPrompt, err := s.generatePrompt(ctx, defaultSystemPromptChatAgent, PromptData{
+	systemPrompt, err := s.generatePrompt(ctx, defaultSystemPromptTemplate, PromptData{
 		Tools:             s.Tools,
 		EnableToolUseShim: s.EnableToolUseShim,
 	})
 	if err != nil {
-		log.Error(err, "Failed to generate system prompt")
-		return err
+		return fmt.Errorf("generating system prompt: %w", err)
 	}
 
 	// Start a new chat session

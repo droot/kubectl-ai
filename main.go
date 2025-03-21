@@ -27,8 +27,8 @@ import (
 	"syscall"
 
 	"github.com/GoogleCloudPlatform/kubectl-ai/gollm"
+	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/agent"
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/journal"
-	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/llmstrategy/chatbased"
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/tools"
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/ui"
 
@@ -43,8 +43,8 @@ var Version = "0.1.0-dev"
 
 // models
 var geminiModels = []string{
-	"gemini-2.0-flash",
 	"gemini-2.0-flash-thinking-exp-01-21",
+	"gemini-2.0-flash",
 }
 
 func main() {
@@ -88,7 +88,7 @@ func (o *Options) InitDefaults() {
 	// default to false because our goal is to make the agent truly autonomous by default
 	o.AsksForConfirmation = false
 	o.MCPServer = false
-	o.EnableToolUseShim = false
+	o.EnableToolUseShim = true
 }
 
 func (o *Options) LoadConfiguration(b []byte) error {
@@ -288,7 +288,7 @@ func run(ctx context.Context) error {
 		return err
 	}
 
-	conversation := &chatbased.Conversation{
+	conversation := &agent.Conversation{
 		Kubeconfig:          kubeconfigPath,
 		LLM:                 llmClient,
 		MaxIterations:       *maxIterations,
