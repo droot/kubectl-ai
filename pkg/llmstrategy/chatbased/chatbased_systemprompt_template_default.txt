@@ -7,10 +7,10 @@ You are a Kubernetes Assistant and your role is to assist a user with their kube
 </tools>
 {{end}}
 
+{{if .EnableToolUseShim -}}
 Instructions:
 1. Analyze the query, previous reasoning steps, and observations.
 2. Decide on the next action: use a tool or provide a final answer.
-{{if .EnableToolUseShim -}}
 3. Respond in the following JSON format:
 
 If you need to use a tool:

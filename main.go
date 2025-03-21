@@ -28,7 +28,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/kubectl-ai/gollm"
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/journal"
-	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/llmstrategy"
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/llmstrategy/chatbased"
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/tools"
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/ui"
@@ -44,6 +43,7 @@ var Version = "0.1.0-dev"
 
 // models
 var geminiModels = []string{
+	"gemini-2.0-flash",
 	"gemini-2.0-flash-thinking-exp-01-21",
 }
 
@@ -66,7 +66,6 @@ func main() {
 }
 
 type Options struct {
-	Strategy   string `json:"strategy,omitempty"`
 	ProviderID string `json:"llmProvider,omitempty"`
 	ModelID    string `json:"model,omitempty"`
 
@@ -74,17 +73,22 @@ type Options struct {
 	// that modifies resources in the cluster.
 	AsksForConfirmation bool `json:"askForConfirmation,omitempty"`
 
+	// EnableToolUseShim is a flag to enable tool use shim.
+	// TODO(droot): figure out a better way to discover if the model supports tool use
+	// and set this automatically.
+	EnableToolUseShim bool `json:"enableToolUseShim,omitempty"`
+
 	MCPServer bool
 }
 
 func (o *Options) InitDefaults() {
 	// default to react because default model doesn't support function calling.
-	o.Strategy = "react"
 	o.ProviderID = "gemini"
 	o.ModelID = geminiModels[0]
 	// default to false because our goal is to make the agent truly autonomous by default
 	o.AsksForConfirmation = false
 	o.MCPServer = false
+	o.EnableToolUseShim = false
 }
 
 func (o *Options) LoadConfiguration(b []byte) error {
@@ -127,9 +131,9 @@ func run(ctx context.Context) error {
 
 	flag.StringVar(&opt.ProviderID, "llm-provider", opt.ProviderID, "language model provider")
 	flag.StringVar(&opt.ModelID, "model", opt.ModelID, "language model e.g. gemini-2.0-flash-thinking-exp-01-21, gemini-2.0-flash")
-	flag.StringVar(&opt.Strategy, "strategy", opt.Strategy, "strategy: react or chat-based")
 	flag.BoolVar(&opt.AsksForConfirmation, "ask-for-confirmation", opt.AsksForConfirmation, "ask for confirmation before executing kubectl commands that modify resources")
 	flag.BoolVar(&opt.MCPServer, "mcp-server", opt.MCPServer, "run in MCP server mode")
+	flag.BoolVar(&opt.EnableToolUseShim, "enable-tool-use-shim", opt.EnableToolUseShim, "enable tool use shim")
 	// add commandline flags for logging
 	klog.InitFlags(nil)
 
@@ -284,33 +288,16 @@ func run(ctx context.Context) error {
 		return err
 	}
 
-	var strategy llmstrategy.Strategy
-	switch opt.Strategy {
-	case "chat-based":
-		strategy = &chatbased.Strategy{
-			Kubeconfig:          kubeconfigPath,
-			LLM:                 llmClient,
-			MaxIterations:       *maxIterations,
-			PromptTemplateFile:  *promptTemplateFile,
-			Tools:               tools.Default(),
-			Recorder:            recorder,
-			RemoveWorkDir:       *removeWorkDir,
-			AsksForConfirmation: opt.AsksForConfirmation,
-		}
-	case "react":
-		strategy = &chatbased.Strategy{
-			Kubeconfig:          kubeconfigPath,
-			LLM:                 llmClient,
-			MaxIterations:       *maxIterations,
-			PromptTemplateFile:  *promptTemplateFile,
-			Tools:               tools.Default(),
-			Recorder:            recorder,
-			RemoveWorkDir:       *removeWorkDir,
-			AsksForConfirmation: opt.AsksForConfirmation,
-			EnableToolUseShim:   true,
-		}
-	default:
-		return fmt.Errorf("invalid strategy: %s", opt.Strategy)
+	strategy := &chatbased.Strategy{
+		Kubeconfig:          kubeconfigPath,
+		LLM:                 llmClient,
+		MaxIterations:       *maxIterations,
+		PromptTemplateFile:  *promptTemplateFile,
+		Tools:               tools.Default(),
+		Recorder:            recorder,
+		RemoveWorkDir:       *removeWorkDir,
+		AsksForConfirmation: opt.AsksForConfirmation,
+		EnableToolUseShim:   opt.EnableToolUseShim,
 	}
 
 	conversation, err := strategy.NewConversation(ctx, u)

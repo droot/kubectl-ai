@@ -137,7 +137,7 @@ func (a *Conversation) RunOneRound(ctx context.Context, query string) error {
 	var currChatContent []any
 
 	// Set the initial message to start the conversation
-	currChatContent = []any{query} //fmt.Sprintf("can you help me with query: %q", query)}
+	currChatContent = []any{query}
 
 	currentIteration := 0
 	maxIterations := a.strategy.MaxIterations
@@ -172,6 +172,15 @@ func (a *Conversation) RunOneRound(ctx context.Context, query string) error {
 
 		candidate := response.Candidates()[0]
 
+		if a.strategy.EnableToolUseShim {
+			// convert the candidate response into a gollm.ChatResponse
+			candidate, err = candidateToShimCandidate(candidate)
+			if err != nil {
+				log.Error(err, "Failed to convert candidate to shim candidate")
+				return err
+			}
+		}
+
 		// Process each part of the response
 		// only applicable is not using tooluse shim
 		var functionCalls []gollm.FunctionCall
@@ -181,78 +190,10 @@ func (a *Conversation) RunOneRound(ctx context.Context, query string) error {
 			if text, ok := part.AsText(); ok {
 				log.Info("text response", "text", text)
 				textResponse := text
-
-				if a.strategy.EnableToolUseShim {
-					reActResp, err := parseReActResponse(textResponse)
-					if err != nil {
-						log.Error(err, "Error parsing ReAct response")
-						a.UI.RenderOutput(ctx, fmt.Sprintf("\nSorry, Couldn't complete the task. LLM error %v\n", err), ui.Foreground(ui.ColorRed))
-						return err
-					}
-
-					if reActResp.Answer != "" {
-						a.UI.RenderOutput(ctx, reActResp.Answer, ui.RenderMarkdown())
-						return nil
-					}
-					// Handle action
-					if reActResp.Action != nil {
-						currChatContent = append(currChatContent, reActResp.Thought)
-						currChatContent = append(currChatContent, reActResp.Action.Reason)
-						// Sanitize and prepare action
-						reActResp.Action.Command = strings.TrimSpace(reActResp.Action.Command)
-
-						functionCallName := reActResp.Action.Name
-						functionCallArgs, err := toMap(reActResp.Action)
-						if err != nil {
-							log.Error(err, "Error converting action to map")
-							return err
-						}
-						delete(functionCallArgs, "name") // passed separately
-						// TODO(droot): Hack: deleting fields from args because I don't like the output from the toolCall.prettyPrint. Pl. fix me.
-						delete(functionCallArgs, "reason")
-						delete(functionCallArgs, "modifies_resource")
-
-						toolCall, err := a.strategy.Tools.ParseToolInvocation(ctx, functionCallName, functionCallArgs)
-						if err != nil {
-							return fmt.Errorf("building tool call: %w", err)
-						}
-
-						a.UI.RenderOutput(ctx, reActResp.Action.Reason, ui.RenderMarkdown())
-						// Display action details
-						s := toolCall.PrettyPrint()
-						a.UI.RenderOutput(ctx, fmt.Sprintf("  Running: %s\n", s), ui.Foreground(ui.ColorGreen))
-
-						if a.strategy.AsksForConfirmation && reActResp.Action.ModifiesResource == "yes" {
-							confirm := a.UI.AskForConfirmation(ctx, "  Are you sure you want to run this command (Y/n)?")
-							if !confirm {
-								a.UI.RenderOutput(ctx, "Sure.\n", ui.RenderMarkdown())
-								return nil
-							}
-						}
-
-						ctx := journal.ContextWithRecorder(ctx, a.recorder)
-
-						output, err := toolCall.InvokeTool(ctx, tools.InvokeToolOptions{
-							WorkDir: a.workDir,
-						})
-						if err != nil {
-							return fmt.Errorf("executing action: %w", err)
-						}
-
-						observation := fmt.Sprintf("Result of running %q:\n%s", reActResp.Action.Command, output)
-						currChatContent = append(currChatContent, observation)
-					}
-					continue
-				} else {
-					// If we have a text response, render it
-					if textResponse != "" {
-						a.UI.RenderOutput(ctx, textResponse, ui.RenderMarkdown())
-					}
+				// If we have a text response, render it
+				if textResponse != "" {
+					a.UI.RenderOutput(ctx, textResponse, ui.RenderMarkdown())
 				}
-			}
-
-			if !a.strategy.EnableToolUseShim {
-				continue
 			}
 
 			// Check if it's a function call
@@ -286,22 +227,27 @@ func (a *Conversation) RunOneRound(ctx context.Context, query string) error {
 						return fmt.Errorf("executing action: %w", err)
 					}
 
-					result, err := toResult(output)
-					if err != nil {
-						return err
+					if a.strategy.EnableToolUseShim {
+						observation := fmt.Sprintf("Result of running %q:\n%s", call.Name, output)
+						currChatContent = append(currChatContent, observation)
+					} else {
+						result, err := toResult(output)
+						if err != nil {
+							return err
+						}
+
+						currChatContent = append(currChatContent, gollm.FunctionCallResult{
+							Name:   call.Name,
+							Result: result,
+						})
 					}
-
-					currChatContent = append(currChatContent, gollm.FunctionCallResult{
-						Name:   call.Name,
-						Result: result,
-					})
-
 				}
+
 			}
 		}
 
 		// If no function calls were made, we're done
-		if len(functionCalls) == 0 && !a.strategy.EnableToolUseShim {
+		if len(functionCalls) == 0 {
 			return nil
 		}
 
@@ -427,4 +373,67 @@ func toMap(v any) (map[string]any, error) {
 		return nil, fmt.Errorf("converting json to map: %w", err)
 	}
 	return m, nil
+}
+
+func candidateToShimCandidate(candidate gollm.Candidate) (*ShimCandidate, error) {
+	for _, part := range candidate.Parts() {
+		if text, ok := part.AsText(); ok {
+			parsedReActResp, err := parseReActResponse(text)
+			if err != nil {
+				return nil, fmt.Errorf("parsing ReAct response: %w", err)
+			}
+			return &ShimCandidate{candidate: parsedReActResp}, nil
+		}
+	}
+	return nil, fmt.Errorf("no text part found in candidate")
+}
+
+type ShimCandidate struct {
+	candidate *ReActResponse
+}
+
+func (c *ShimCandidate) String() string {
+	return fmt.Sprintf("Thought: %s\nAnswer: %s\nAction: %s", c.candidate.Thought, c.candidate.Answer, c.candidate.Action)
+}
+
+func (c *ShimCandidate) Parts() []gollm.Part {
+	var parts []gollm.Part
+	if c.candidate.Thought != "" {
+		parts = append(parts, &ShimPart{text: c.candidate.Thought})
+	}
+	if c.candidate.Answer != "" {
+		parts = append(parts, &ShimPart{text: c.candidate.Answer})
+	}
+	if c.candidate.Action != nil {
+		parts = append(parts, &ShimPart{action: c.candidate.Action})
+	}
+	return parts
+}
+
+type ShimPart struct {
+	text   string
+	action *Action
+}
+
+func (p *ShimPart) AsText() (string, bool) {
+	return p.text, p.text != ""
+}
+
+func (p *ShimPart) AsFunctionCalls() ([]gollm.FunctionCall, bool) {
+	if p.action != nil {
+		functionCallArgs, err := toMap(p.action)
+		if err != nil {
+			return nil, false
+		}
+		delete(functionCallArgs, "name") // passed separately
+		// delete(functionCallArgs, "reason")
+		// delete(functionCallArgs, "modifies_resource")
+		return []gollm.FunctionCall{
+			{
+				Name:      p.action.Name,
+				Arguments: functionCallArgs,
+			},
+		}, true
+	}
+	return nil, false
 }
