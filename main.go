@@ -288,7 +288,7 @@ func run(ctx context.Context) error {
 		return err
 	}
 
-	strategy := &chatbased.Strategy{
+	conversation := &chatbased.Conversation{
 		Kubeconfig:          kubeconfigPath,
 		LLM:                 llmClient,
 		MaxIterations:       *maxIterations,
@@ -300,7 +300,7 @@ func run(ctx context.Context) error {
 		EnableToolUseShim:   opt.EnableToolUseShim,
 	}
 
-	conversation, err := strategy.NewConversation(ctx, u)
+	err = conversation.Init(ctx, u)
 	if err != nil {
 		return fmt.Errorf("starting conversation: %w", err)
 	}
@@ -335,7 +335,7 @@ func run(ctx context.Context) error {
 		case query == "":
 			continue
 		case query == "reset":
-			conversation, err = strategy.NewConversation(ctx, u)
+			err = conversation.Init(ctx, u)
 			if err != nil {
 				return err
 			}

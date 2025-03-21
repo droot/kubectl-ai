@@ -27,7 +27,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/kubectl-ai/gollm"
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/journal"
-	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/llmstrategy"
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/tools"
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/ui"
 	"k8s.io/klog/v2"
@@ -36,14 +35,11 @@ import (
 //go:embed chatbased_systemprompt_template_default.txt
 var defaultSystemPromptChatAgent string
 
-type Strategy struct {
+type Conversation struct {
 	LLM gollm.Client
 
 	// PromptTemplateFile allows specifying a custom template file
 	PromptTemplateFile string
-
-	// Recorder captures events for diagnostics
-	Recorder journal.Recorder
 
 	RemoveWorkDir bool
 
@@ -55,13 +51,9 @@ type Strategy struct {
 	Tools tools.Tools
 
 	EnableToolUseShim bool
-}
-
-type Conversation struct {
-	strategy *Strategy
 
 	// Recorder captures events for diagnostics
-	recorder journal.Recorder
+	Recorder journal.Recorder
 
 	UI      ui.UI
 	llmChat gollm.Chat
@@ -69,14 +61,14 @@ type Conversation struct {
 	workDir string
 }
 
-func (s *Strategy) NewConversation(ctx context.Context, u ui.UI) (llmstrategy.Conversation, error) {
+func (s *Conversation) Init(ctx context.Context, u ui.UI) error {
 	log := klog.FromContext(ctx)
 
 	// Create a temporary working directory
 	workDir, err := os.MkdirTemp("", "agent-workdir-*")
 	if err != nil {
 		log.Error(err, "Failed to create temporary working directory")
-		return nil, err
+		return err
 	}
 
 	log.Info("Created temporary working directory", "workDir", workDir)
@@ -87,7 +79,7 @@ func (s *Strategy) NewConversation(ctx context.Context, u ui.UI) (llmstrategy.Co
 	})
 	if err != nil {
 		log.Error(err, "Failed to generate system prompt")
-		return nil, err
+		return err
 	}
 
 	// Start a new chat session
@@ -103,22 +95,19 @@ func (s *Strategy) NewConversation(ctx context.Context, u ui.UI) (llmstrategy.Co
 			return functionDefinitions[i].Name < functionDefinitions[j].Name
 		})
 		if err := llmChat.SetFunctionDefinitions(functionDefinitions); err != nil {
-			return nil, fmt.Errorf("setting function definitions: %w", err)
+			return fmt.Errorf("setting function definitions: %w", err)
 		}
 	}
+	s.llmChat = llmChat
+	s.workDir = workDir
+	s.UI = u
 
-	return &Conversation{
-		strategy: s,
-		recorder: s.Recorder,
-		UI:       u,
-		llmChat:  llmChat,
-		workDir:  workDir,
-	}, nil
+	return nil
 }
 
 func (c *Conversation) Close() error {
 	if c.workDir != "" {
-		if c.strategy.RemoveWorkDir {
+		if c.RemoveWorkDir {
 			if err := os.RemoveAll(c.workDir); err != nil {
 				klog.Warningf("error cleaning up directory %q: %v", c.workDir, err)
 			}
@@ -140,12 +129,12 @@ func (a *Conversation) RunOneRound(ctx context.Context, query string) error {
 	currChatContent = []any{query}
 
 	currentIteration := 0
-	maxIterations := a.strategy.MaxIterations
+	maxIterations := a.MaxIterations
 
 	for currentIteration < maxIterations {
 		log.Info("Starting iteration", "iteration", currentIteration)
 
-		a.recorder.Write(ctx, &journal.Event{
+		a.Recorder.Write(ctx, &journal.Event{
 			Timestamp: time.Now(),
 			Action:    "llm-chat",
 			Payload:   []any{currChatContent},
@@ -157,7 +146,7 @@ func (a *Conversation) RunOneRound(ctx context.Context, query string) error {
 			return err
 		}
 
-		a.recorder.Write(ctx, &journal.Event{
+		a.Recorder.Write(ctx, &journal.Event{
 			Timestamp: time.Now(),
 			Action:    "llm-response",
 			Payload:   response,
@@ -172,7 +161,7 @@ func (a *Conversation) RunOneRound(ctx context.Context, query string) error {
 
 		candidate := response.Candidates()[0]
 
-		if a.strategy.EnableToolUseShim {
+		if a.EnableToolUseShim {
 			// convert the candidate response into a gollm.ChatResponse
 			candidate, err = candidateToShimCandidate(candidate)
 			if err != nil {
@@ -204,14 +193,14 @@ func (a *Conversation) RunOneRound(ctx context.Context, query string) error {
 				// TODO(droot): Run all function calls in parallel
 				// (may have to specify in the prompt to make these function calls independent)
 				for _, call := range calls {
-					toolCall, err := a.strategy.Tools.ParseToolInvocation(ctx, call.Name, call.Arguments)
+					toolCall, err := a.Tools.ParseToolInvocation(ctx, call.Name, call.Arguments)
 					if err != nil {
 						return fmt.Errorf("building tool call: %w", err)
 					}
 
 					s := toolCall.PrettyPrint()
 					a.UI.RenderOutput(ctx, fmt.Sprintf("  Running: %s\n", s), ui.Foreground(ui.ColorGreen))
-					if a.strategy.AsksForConfirmation && call.Arguments["modifies_resource"] == "no" {
+					if a.AsksForConfirmation && call.Arguments["modifies_resource"] == "no" {
 						confirm := a.UI.AskForConfirmation(ctx, "  Are you sure you want to run this command (Y/n)? ")
 						if !confirm {
 							a.UI.RenderOutput(ctx, "Sure.\n", ui.RenderMarkdown())
@@ -219,7 +208,7 @@ func (a *Conversation) RunOneRound(ctx context.Context, query string) error {
 						}
 					}
 
-					ctx := journal.ContextWithRecorder(ctx, a.recorder)
+					ctx := journal.ContextWithRecorder(ctx, a.Recorder)
 					output, err := toolCall.InvokeTool(ctx, tools.InvokeToolOptions{
 						WorkDir: a.workDir,
 					})
@@ -227,7 +216,7 @@ func (a *Conversation) RunOneRound(ctx context.Context, query string) error {
 						return fmt.Errorf("executing action: %w", err)
 					}
 
-					if a.strategy.EnableToolUseShim {
+					if a.EnableToolUseShim {
 						observation := fmt.Sprintf("Result of running %q:\n%s", call.Name, output)
 						currChatContent = append(currChatContent, observation)
 					} else {
@@ -275,7 +264,7 @@ func toResult(v any) (map[string]any, error) {
 }
 
 // generateFromTemplate generates a prompt for LLM. It uses the prompt from the provides template file or default.
-func (a *Strategy) generatePrompt(_ context.Context, defaultPromptTemplate string, data PromptData) (string, error) {
+func (a *Conversation) generatePrompt(_ context.Context, defaultPromptTemplate string, data PromptData) (string, error) {
 	promptTemplate := defaultPromptTemplate
 	if a.PromptTemplateFile != "" {
 		content, err := os.ReadFile(a.PromptTemplateFile)
