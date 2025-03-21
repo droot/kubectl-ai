@@ -30,7 +30,6 @@ import (
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/journal"
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/llmstrategy"
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/llmstrategy/chatbased"
-	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/llmstrategy/react"
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/tools"
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/ui"
 
@@ -299,7 +298,7 @@ func run(ctx context.Context) error {
 			AsksForConfirmation: opt.AsksForConfirmation,
 		}
 	case "react":
-		strategy = &react.Strategy{
+		strategy = &chatbased.Strategy{
 			Kubeconfig:          kubeconfigPath,
 			LLM:                 llmClient,
 			MaxIterations:       *maxIterations,
@@ -308,6 +307,7 @@ func run(ctx context.Context) error {
 			Recorder:            recorder,
 			RemoveWorkDir:       *removeWorkDir,
 			AsksForConfirmation: opt.AsksForConfirmation,
+			EnableToolUseShim:   true,
 		}
 	default:
 		return fmt.Errorf("invalid strategy: %s", opt.Strategy)

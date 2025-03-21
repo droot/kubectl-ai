@@ -53,6 +53,8 @@ type Strategy struct {
 	AsksForConfirmation bool
 
 	Tools tools.Tools
+
+	EnableToolUseShim bool
 }
 
 type Conversation struct {
@@ -79,7 +81,10 @@ func (s *Strategy) NewConversation(ctx context.Context, u ui.UI) (llmstrategy.Co
 
 	log.Info("Created temporary working directory", "workDir", workDir)
 
-	systemPrompt, err := s.generatePrompt(ctx, defaultSystemPromptChatAgent)
+	systemPrompt, err := s.generatePrompt(ctx, defaultSystemPromptChatAgent, PromptData{
+		Tools:             s.Tools,
+		EnableToolUseShim: s.EnableToolUseShim,
+	})
 	if err != nil {
 		log.Error(err, "Failed to generate system prompt")
 		return nil, err
@@ -88,16 +93,18 @@ func (s *Strategy) NewConversation(ctx context.Context, u ui.UI) (llmstrategy.Co
 	// Start a new chat session
 	llmChat := s.LLM.StartChat(systemPrompt)
 
-	var functionDefinitions []*gollm.FunctionDefinition
-	for _, tool := range s.Tools.AllTools() {
-		functionDefinitions = append(functionDefinitions, tool.FunctionDefinition())
-	}
-	// Sort function definitions to help KV cache reuse
-	sort.Slice(functionDefinitions, func(i, j int) bool {
-		return functionDefinitions[i].Name < functionDefinitions[j].Name
-	})
-	if err := llmChat.SetFunctionDefinitions(functionDefinitions); err != nil {
-		return nil, fmt.Errorf("setting function definitions: %w", err)
+	if !s.EnableToolUseShim {
+		var functionDefinitions []*gollm.FunctionDefinition
+		for _, tool := range s.Tools.AllTools() {
+			functionDefinitions = append(functionDefinitions, tool.FunctionDefinition())
+		}
+		// Sort function definitions to help KV cache reuse
+		sort.Slice(functionDefinitions, func(i, j int) bool {
+			return functionDefinitions[i].Name < functionDefinitions[j].Name
+		})
+		if err := llmChat.SetFunctionDefinitions(functionDefinitions); err != nil {
+			return nil, fmt.Errorf("setting function definitions: %w", err)
+		}
 	}
 
 	return &Conversation{
@@ -166,6 +173,7 @@ func (a *Conversation) RunOneRound(ctx context.Context, query string) error {
 		candidate := response.Candidates()[0]
 
 		// Process each part of the response
+		// only applicable is not using tooluse shim
 		var functionCalls []gollm.FunctionCall
 
 		for _, part := range candidate.Parts() {
@@ -173,10 +181,78 @@ func (a *Conversation) RunOneRound(ctx context.Context, query string) error {
 			if text, ok := part.AsText(); ok {
 				log.Info("text response", "text", text)
 				textResponse := text
-				// If we have a text response, render it
-				if textResponse != "" {
-					a.UI.RenderOutput(ctx, textResponse, ui.RenderMarkdown())
+
+				if a.strategy.EnableToolUseShim {
+					reActResp, err := parseReActResponse(textResponse)
+					if err != nil {
+						log.Error(err, "Error parsing ReAct response")
+						a.UI.RenderOutput(ctx, fmt.Sprintf("\nSorry, Couldn't complete the task. LLM error %v\n", err), ui.Foreground(ui.ColorRed))
+						return err
+					}
+
+					if reActResp.Answer != "" {
+						a.UI.RenderOutput(ctx, reActResp.Answer, ui.RenderMarkdown())
+						return nil
+					}
+					// Handle action
+					if reActResp.Action != nil {
+						currChatContent = append(currChatContent, reActResp.Thought)
+						currChatContent = append(currChatContent, reActResp.Action.Reason)
+						// Sanitize and prepare action
+						reActResp.Action.Command = strings.TrimSpace(reActResp.Action.Command)
+
+						functionCallName := reActResp.Action.Name
+						functionCallArgs, err := toMap(reActResp.Action)
+						if err != nil {
+							log.Error(err, "Error converting action to map")
+							return err
+						}
+						delete(functionCallArgs, "name") // passed separately
+						// TODO(droot): Hack: deleting fields from args because I don't like the output from the toolCall.prettyPrint. Pl. fix me.
+						delete(functionCallArgs, "reason")
+						delete(functionCallArgs, "modifies_resource")
+
+						toolCall, err := a.strategy.Tools.ParseToolInvocation(ctx, functionCallName, functionCallArgs)
+						if err != nil {
+							return fmt.Errorf("building tool call: %w", err)
+						}
+
+						a.UI.RenderOutput(ctx, reActResp.Action.Reason, ui.RenderMarkdown())
+						// Display action details
+						s := toolCall.PrettyPrint()
+						a.UI.RenderOutput(ctx, fmt.Sprintf("  Running: %s\n", s), ui.Foreground(ui.ColorGreen))
+
+						if a.strategy.AsksForConfirmation && reActResp.Action.ModifiesResource == "yes" {
+							confirm := a.UI.AskForConfirmation(ctx, "  Are you sure you want to run this command (Y/n)?")
+							if !confirm {
+								a.UI.RenderOutput(ctx, "Sure.\n", ui.RenderMarkdown())
+								return nil
+							}
+						}
+
+						ctx := journal.ContextWithRecorder(ctx, a.recorder)
+
+						output, err := toolCall.InvokeTool(ctx, tools.InvokeToolOptions{
+							WorkDir: a.workDir,
+						})
+						if err != nil {
+							return fmt.Errorf("executing action: %w", err)
+						}
+
+						observation := fmt.Sprintf("Result of running %q:\n%s", reActResp.Action.Command, output)
+						currChatContent = append(currChatContent, observation)
+					}
+					continue
+				} else {
+					// If we have a text response, render it
+					if textResponse != "" {
+						a.UI.RenderOutput(ctx, textResponse, ui.RenderMarkdown())
+					}
 				}
+			}
+
+			if !a.strategy.EnableToolUseShim {
+				continue
 			}
 
 			// Check if it's a function call
@@ -225,7 +301,7 @@ func (a *Conversation) RunOneRound(ctx context.Context, query string) error {
 		}
 
 		// If no function calls were made, we're done
-		if len(functionCalls) == 0 {
+		if len(functionCalls) == 0 && !a.strategy.EnableToolUseShim {
 			return nil
 		}
 
@@ -253,10 +329,9 @@ func toResult(v any) (map[string]any, error) {
 }
 
 // generateFromTemplate generates a prompt for LLM. It uses the prompt from the provides template file or default.
-func (a *Strategy) generatePrompt(_ context.Context, defaultPromptTemplate string) (string, error) {
+func (a *Strategy) generatePrompt(_ context.Context, defaultPromptTemplate string, data PromptData) (string, error) {
 	promptTemplate := defaultPromptTemplate
 	if a.PromptTemplateFile != "" {
-		// Read custom template file
 		content, err := os.ReadFile(a.PromptTemplateFile)
 		if err != nil {
 			return "", fmt.Errorf("error reading template file: %v", err)
@@ -269,15 +344,87 @@ func (a *Strategy) generatePrompt(_ context.Context, defaultPromptTemplate strin
 		return "", fmt.Errorf("building template for prompt: %w", err)
 	}
 
-	data := map[string]string{}
-
-	// Use a strings.Builder for efficient string concatenation
 	var result strings.Builder
-	// Execute the template, writing the output to the strings.Builder
-	err = tmpl.Execute(&result, data)
+	err = tmpl.Execute(&result, &data)
 	if err != nil {
 		return "", fmt.Errorf("evaluating template for prompt: %w", err)
 	}
-
 	return result.String(), nil
+}
+
+// PromptData represents the structure of the data to be filled into the template.
+type PromptData struct {
+	Query string
+	Tools tools.Tools
+
+	EnableToolUseShim bool
+}
+
+func (a *PromptData) ToolsAsJSON() string {
+	var toolDefinitions []*gollm.FunctionDefinition
+
+	for _, tool := range a.Tools.AllTools() {
+		toolDefinitions = append(toolDefinitions, tool.FunctionDefinition())
+	}
+
+	json, err := json.MarshalIndent(toolDefinitions, "", "  ")
+	if err != nil {
+		return ""
+	}
+	return string(json)
+}
+
+func (a *PromptData) ToolNames() string {
+	return strings.Join(a.Tools.Names(), ", ")
+}
+
+type ReActResponse struct {
+	Thought string  `json:"thought"`
+	Answer  string  `json:"answer,omitempty"`
+	Action  *Action `json:"action,omitempty"`
+}
+
+type Action struct {
+	Name             string `json:"name"`
+	Reason           string `json:"reason"`
+	Command          string `json:"command"`
+	ModifiesResource string `json:"modifies_resource"`
+}
+
+// parseReActResponse parses the LLM response into a ReActResponse struct
+// This function assumes the input contains exactly one JSON code block
+// formatted with ```json and ``` markers. The JSON block is expected to
+// contain a valid ReActResponse object.
+func parseReActResponse(input string) (*ReActResponse, error) {
+	cleaned := strings.TrimSpace(input)
+
+	const jsonBlockMarker = "```json"
+	first := strings.Index(cleaned, jsonBlockMarker)
+	last := strings.LastIndex(cleaned, "```")
+	if first == -1 || last == -1 {
+		return nil, fmt.Errorf("no JSON code block found in %q", cleaned)
+	}
+	cleaned = cleaned[first+len(jsonBlockMarker) : last]
+
+	cleaned = strings.ReplaceAll(cleaned, "\n", "")
+	cleaned = strings.TrimSpace(cleaned)
+
+	var reActResp ReActResponse
+	if err := json.Unmarshal([]byte(cleaned), &reActResp); err != nil {
+		return nil, fmt.Errorf("parsing JSON %q: %w", cleaned, err)
+	}
+	return &reActResp, nil
+}
+
+// toMap converts the value to a map, going via JSON
+func toMap(v any) (map[string]any, error) {
+	j, err := json.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf("converting %T to json: %w", v, err)
+	}
+	m := make(map[string]any)
+	if err := json.Unmarshal(j, &m); err != nil {
+		return nil, fmt.Errorf("converting json to map: %w", err)
+	}
+	return m, nil
 }
