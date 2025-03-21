@@ -32,8 +32,8 @@ import (
 	"k8s.io/klog/v2"
 )
 
-//go:embed react_prompt_template_default.txt
-var defaultReActPromptTemplate string
+//go:embed react_systemprompt_template_default.txt
+var defaultSystemPromptTemplate string
 
 type Strategy struct {
 	LLM gollm.Client
@@ -44,9 +44,9 @@ type Strategy struct {
 	// Recorder captures events for diagnostics
 	Recorder journal.Recorder
 
-	MaxIterations int
-
 	RemoveWorkDir bool
+
+	MaxIterations int
 
 	Kubeconfig          string
 	AsksForConfirmation bool
@@ -56,26 +56,20 @@ type Strategy struct {
 
 type Conversation struct {
 	strategy *Strategy
-	workDir  string
 
-	// recorder captures events for diagnostics
 	recorder journal.Recorder
 
-	userInterface ui.UI
-
-	llmClient gollm.Client
+	UI      ui.UI
+	llmChat gollm.Chat
 
 	MaxIterations int
 
-	previousQueries  []string
-	currentIteration int
-	messages         []Message
+	workDir string
 }
 
 func (s *Strategy) NewConversation(ctx context.Context, userInterface ui.UI) (llmstrategy.Conversation, error) {
 	log := klog.FromContext(ctx)
 
-	// Create a temporary working directory
 	// Create a temporary working directory
 	workDir, err := os.MkdirTemp("", "agent-workdir-*")
 	if err != nil {
@@ -83,14 +77,24 @@ func (s *Strategy) NewConversation(ctx context.Context, userInterface ui.UI) (ll
 	}
 
 	log.Info("Created temporary working directory", "workDir", workDir)
+	data := PromptData{
+		Tools: s.Tools,
+	}
+
+	systemPrompt, err := s.generatePrompt(ctx, defaultSystemPromptTemplate, data)
+	if err != nil {
+		log.Error(err, "Failed to generate system prompt")
+		return nil, err
+	}
+
+	llmChat := s.LLM.StartChat(systemPrompt)
 
 	return &Conversation{
 		strategy:      s,
 		workDir:       workDir,
 		recorder:      s.Recorder,
-		userInterface: userInterface,
-		llmClient:     s.LLM,
-
+		UI:            userInterface,
+		llmChat:       llmChat,
 		MaxIterations: s.MaxIterations,
 	}, nil
 }
@@ -111,82 +115,117 @@ func (a *Conversation) RunOneRound(ctx context.Context, query string) error {
 	log := klog.FromContext(ctx)
 	log.Info("Executing query:", "query", query)
 
-	a.ResetHistory()
+	var currChatContent []any
 
-	u := a.userInterface
+	currChatContent = []any{query}
 
+	u := a.UI
+
+	currentIteration := 0
 	// Main execution loop
-	for a.currentIteration < a.MaxIterations {
-		log.Info("Starting iteration", "iteration", a.currentIteration)
+	for currentIteration < a.MaxIterations {
+		log.Info("Starting iteration", "iteration", currentIteration)
 
-		// Get next action from LLM
-		reActResp, err := a.askLLM(ctx, query)
+		a.recorder.Write(ctx, &journal.Event{
+			Timestamp: time.Now(),
+			Action:    "llm-chat",
+			Payload:   []any{currChatContent},
+		})
+
+		response, err := a.llmChat.Send(ctx, currChatContent...)
 		if err != nil {
-			log.Error(err, "Error asking LLM")
-			u.RenderOutput(ctx, fmt.Sprintf("\nSorry, Couldn't complete the task. LLM error %v\n", err), ui.Foreground(ui.ColorRed))
+			log.Error(err, "Error sending initial message")
 			return err
 		}
 
-		// Log the thought process
-		log.Info("Thinking...", "thought", reActResp.Thought)
-		a.addMessage(ctx, "assistant", fmt.Sprintf("Thought: %s", reActResp.Thought))
+		a.recorder.Write(ctx, &journal.Event{
+			Timestamp: time.Now(),
+			Action:    "llm-response",
+			Payload:   response,
+		})
 
-		// Handle final answer
-		if reActResp.Answer != "" {
-			log.Info("Final answer received", "answer", reActResp.Answer)
-			a.addMessage(ctx, "assistant", fmt.Sprintf("Final Answer: %s", reActResp.Answer))
-			u.RenderOutput(ctx, reActResp.Answer, ui.RenderMarkdown())
-			return nil
+		if len(response.Candidates()) == 0 {
+			log.Error(nil, "No candidates in response")
+			return fmt.Errorf("no candidates in LLM response")
 		}
 
-		// Handle action
-		if reActResp.Action != nil {
-			// Sanitize and prepare action
-			reActResp.Action.Command = sanitizeToolInput(reActResp.Action.Command)
-			a.addMessage(ctx, "user", fmt.Sprintf("Action: %q", reActResp.Action.Command))
+		candidate := response.Candidates()[0]
 
-			functionCallName := reActResp.Action.Name
-			functionCallArgs, err := toMap(reActResp.Action)
+		for _, part := range candidate.Parts() {
+			text, ok := part.AsText()
+			if !ok {
+				continue
+			}
+			if text == "" {
+				log.Info("empty text response")
+				continue
+			}
+
+			log.Info("text response", "text", text)
+			textResponse := text
+			reActResp, err := parseReActResponse(textResponse)
 			if err != nil {
+				log.Error(err, "Error parsing ReAct response")
+				u.RenderOutput(ctx, fmt.Sprintf("\nSorry, Couldn't complete the task. LLM error %v\n", err), ui.Foreground(ui.ColorRed))
 				return err
 			}
-			delete(functionCallArgs, "name") // passed separately
 
-			toolCall, err := a.strategy.Tools.ParseToolInvocation(ctx, functionCallName, functionCallArgs)
-			if err != nil {
-				return fmt.Errorf("building tool call: %w", err)
+			if reActResp.Answer != "" {
+				u.RenderOutput(ctx, reActResp.Answer, ui.RenderMarkdown())
+				return nil
 			}
+			// Handle action
+			if reActResp.Action != nil {
+				currChatContent = append(currChatContent, reActResp.Thought)
+				currChatContent = append(currChatContent, reActResp.Action.Reason)
+				// Sanitize and prepare action
+				reActResp.Action.Command = sanitizeToolInput(reActResp.Action.Command)
 
-			// Display action details
-			s := toolCall.PrettyPrint()
-			u.RenderOutput(ctx, fmt.Sprintf("  Running: %s\n", s), ui.Foreground(ui.ColorGreen))
-			u.RenderOutput(ctx, reActResp.Action.Reason, ui.RenderMarkdown())
-
-			if a.strategy.AsksForConfirmation && reActResp.Action.ModifiesResource == "yes" {
-				confirm := u.AskForConfirmation(ctx, "  Are you sure you want to run this command (Y/n)?")
-				if !confirm {
-					u.RenderOutput(ctx, "Sure.\n", ui.RenderMarkdown())
-					return nil
+				functionCallName := reActResp.Action.Name
+				functionCallArgs, err := toMap(reActResp.Action)
+				if err != nil {
+					return err
 				}
-			}
+				delete(functionCallArgs, "name") // passed separately
+				delete(functionCallArgs, "reason")
+				delete(functionCallArgs, "modifies_resource")
 
-			// Execute action
-			output, err := a.executeAction(ctx, toolCall, a.workDir)
-			if err != nil {
-				log.Error(err, "Error executing action")
-				return err
-			}
+				toolCall, err := a.strategy.Tools.ParseToolInvocation(ctx, functionCallName, functionCallArgs)
+				if err != nil {
+					return fmt.Errorf("building tool call: %w", err)
+				}
 
-			// Record observation
-			observation := fmt.Sprintf("Output of %q:\n%s", reActResp.Action.Command, output)
-			a.addMessage(ctx, "user", observation)
+				u.RenderOutput(ctx, reActResp.Action.Reason, ui.RenderMarkdown())
+				// Display action details
+				s := toolCall.PrettyPrint()
+				u.RenderOutput(ctx, fmt.Sprintf("  Running: %s\n", s), ui.Foreground(ui.ColorGreen))
+
+				if a.strategy.AsksForConfirmation && reActResp.Action.ModifiesResource == "yes" {
+					confirm := u.AskForConfirmation(ctx, "  Are you sure you want to run this command (Y/n)?")
+					if !confirm {
+						u.RenderOutput(ctx, "Sure.\n", ui.RenderMarkdown())
+						return nil
+					}
+				}
+
+				ctx := journal.ContextWithRecorder(ctx, a.recorder)
+
+				output, err := toolCall.InvokeTool(ctx, tools.InvokeToolOptions{
+					WorkDir: a.workDir,
+				})
+				if err != nil {
+					return fmt.Errorf("executing action: %w", err)
+				}
+
+				observation := fmt.Sprintf("Result of running %q:\n%s", reActResp.Action.Command, output)
+				currChatContent = append(currChatContent, observation)
+			}
 		}
-
-		a.currentIteration++
+		currentIteration++
 	}
 
 	// Handle max iterations reached
-	log.Info("Max iterations reached", "iterations", a.currentIteration)
+	log.Info("Max iterations reached", "iterations", currentIteration)
 	u.RenderOutput(ctx, fmt.Sprintf("\nSorry, Couldn't complete the task after %d attempts.\n", a.MaxIterations), ui.Foreground(ui.ColorRed))
 	return a.recordError(ctx, fmt.Errorf("max iterations reached"))
 }
@@ -212,7 +251,6 @@ func (a *Conversation) executeAction(ctx context.Context, tool *tools.ToolCall, 
 		WorkDir: a.workDir,
 	})
 	if err != nil {
-		a.addMessage(ctx, "system", fmt.Sprintf("Error: %v", err))
 		return "", err
 	}
 
@@ -228,67 +266,8 @@ func (a *Conversation) executeAction(ctx context.Context, tool *tools.ToolCall, 
 	}
 }
 
-// AskLLM asks the LLM for the next action, sending a prompt including the .History
-func (a *Conversation) askLLM(ctx context.Context, query string) (*ReActResponse, error) {
-	log := klog.FromContext(ctx)
-	log.Info("Asking LLM...")
-
-	data := PromptData{
-		Query:           query,
-		PreviousQueries: a.previousQueries,
-		History:         a.messages,
-		Tools:           strings.Join(a.strategy.Tools.Names(), ", "),
-	}
-
-	prompt, err := a.strategy.generatePrompt(ctx, defaultReActPromptTemplate, data)
-	if err != nil {
-		return nil, fmt.Errorf("generating prompt: %w", err)
-	}
-
-	log.Info("Thinking...", "prompt", prompt)
-
-	response, err := a.llmClient.GenerateCompletion(ctx, &gollm.CompletionRequest{
-		Prompt: prompt,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("generating LLM completion: %w", err)
-	}
-
-	a.previousQueries = append(a.previousQueries, query)
-
-	a.recorder.Write(ctx, &journal.Event{
-		Timestamp: time.Now(),
-		Action:    "llm-response",
-		Payload:   response,
-	})
-
-	reActResp, err := parseReActResponse(response.Response())
-	if err != nil {
-		return nil, fmt.Errorf("parsing ReAct response: %w", err)
-	}
-	return reActResp, nil
-}
-
 func sanitizeToolInput(input string) string {
 	return strings.TrimSpace(input)
-}
-
-func (a *Conversation) addMessage(ctx context.Context, role, content string) error {
-	log := klog.FromContext(ctx)
-	log.Info("Tracing...")
-
-	msg := Message{
-		Role:    role,
-		Content: content,
-	}
-	a.messages = append(a.messages, msg)
-	a.recorder.Write(ctx, &journal.Event{
-		Timestamp: time.Now(),
-		Action:    "trace",
-		Payload:   msg,
-	})
-
-	return nil
 }
 
 func (a *Conversation) recordError(ctx context.Context, err error) error {
@@ -297,18 +276,6 @@ func (a *Conversation) recordError(ctx context.Context, err error) error {
 		Action:    "error",
 		Payload:   err.Error(),
 	})
-}
-
-func (a *Conversation) HistoryAsJSON() string {
-	json, err := json.MarshalIndent(a.messages, "", "  ")
-	if err != nil {
-		return ""
-	}
-	return string(json)
-}
-
-func (a *Conversation) ResetHistory() {
-	a.messages = []Message{}
 }
 
 type ReActResponse struct {
@@ -324,33 +291,28 @@ type Action struct {
 	ModifiesResource string `json:"modifies_resource"`
 }
 
-type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
 // PromptData represents the structure of the data to be filled into the template.
 type PromptData struct {
-	Query           string
-	PreviousQueries []string
-	History         []Message
-	Tools           string
+	Query string
+	Tools tools.Tools
 }
 
-func (a *PromptData) PreviousQueriesAsJSON() string {
-	json, err := json.MarshalIndent(a.PreviousQueries, "", "  ")
+func (a *PromptData) ToolsAsJSON() string {
+	var toolDefinitions []*gollm.FunctionDefinition
+
+	for _, tool := range a.Tools.AllTools() {
+		toolDefinitions = append(toolDefinitions, tool.FunctionDefinition())
+	}
+
+	json, err := json.MarshalIndent(toolDefinitions, "", "  ")
 	if err != nil {
 		return ""
 	}
 	return string(json)
 }
 
-func (a *PromptData) HistoryAsJSON() string {
-	json, err := json.MarshalIndent(a.History, "", "  ")
-	if err != nil {
-		return ""
-	}
-	return string(json)
+func (a *PromptData) ToolNames() string {
+	return strings.Join(a.Tools.Names(), ", ")
 }
 
 // generateFromTemplate generates a prompt for LLM. It uses the prompt from the provides template file or default.
