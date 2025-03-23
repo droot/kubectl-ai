@@ -66,20 +66,13 @@ var _ Client = &GeminiClient{}
 
 // ListModels lists the models available in the Gemini API.
 func (c *GeminiClient) ListModels(ctx context.Context) (modelNames []string, err error) {
-	return []string{geminiDefaultModel}, nil
-	// models := c.client.Models.All(ctx)
-
-	// for {
-	// 	m, err := models.Next()
-	// 	if err != nil {
-	// 		if err == iterator.Done {
-	// 			break
-	// 		}
-	// 		return nil, err
-	// 	}
-	// 	modelNames = append(modelNames, strings.TrimPrefix(m.Name, "models/"))
-	// }
-	// return modelNames, nil
+	for model, err := range c.client.Models.All(ctx) {
+		if err != nil {
+			return nil, fmt.Errorf("error listing models: %w", err)
+		}
+		modelNames = append(modelNames, strings.TrimPrefix(model.Name, "models/"))
+	}
+	return modelNames, nil
 }
 
 // Close frees the resources used by the client.
@@ -114,17 +107,21 @@ func (c *GeminiClient) SetResponseSchema(responseSchema *Schema) error {
 func (c *GeminiClient) GenerateCompletion(ctx context.Context, request *CompletionRequest) (CompletionResponse, error) {
 	log := klog.FromContext(ctx)
 
-	// if c.responseSchema != nil {
-	// 	model.ResponseSchema = c.responseSchema
-	// 	model.ResponseMIMEType = "application/json"
-	// }
+	var config *genai.GenerateContentConfig
+
+	if c.responseSchema != nil {
+		config = &genai.GenerateContentConfig{
+			ResponseSchema:   c.responseSchema,
+			ResponseMIMEType: "application/json",
+		}
+	}
 
 	content := []*genai.Content{
 		{Role: "user", Parts: []*genai.Part{{Text: request.Prompt}}},
 	}
 
 	log.Info("sending GenerateContent request to gemini", "content", content)
-	result, err := c.client.Models.GenerateContent(ctx, c.model, content, nil)
+	result, err := c.client.Models.GenerateContent(ctx, c.model, content, config)
 	if err != nil {
 		return nil, err
 	}
@@ -134,51 +131,45 @@ func (c *GeminiClient) GenerateCompletion(ctx context.Context, request *Completi
 
 // StartChat starts a new chat with the model.
 func (c *GeminiClient) StartChat(systemPrompt string) Chat {
-	// model := c.client.GenerativeModel(c.model)
-
 	// Some values that are recommended by aistudio
-	// model.SetTemperature(1)
-	// model.SetTopK(40)
-	// model.SetTopP(0.95)
-	// model.SetMaxOutputTokens(8192)
-	// model.ResponseMIMEType = "text/plain"
-
-	// if c.responseSchema != nil {
-	// 	model.ResponseSchema = c.responseSchema
-	// 	model.ResponseMIMEType = "application/json"
-	// }
-
 	temperature := float32(1.0)
 	topK := float32(40)
 	topP := float32(0.95)
 	maxOutputTokens := int32(8192)
-	responseMIMEType := "text/plain"
 
-	return &GeminiChat{
+	chat := &GeminiChat{
 		model:  c.model,
 		client: c.client,
 		genConfig: &genai.GenerateContentConfig{
-			// SystemInstruction: &genai.Content{
-			// 	Parts: []*genai.Part{
-			// 		{Text: systemPrompt},
-			// 	},
-			// },
-			Temperature:      &temperature,
-			TopK:             &topK,
-			TopP:             &topP,
-			MaxOutputTokens:  &maxOutputTokens,
-			ResponseMIMEType: responseMIMEType,
-		},
-		history: []*genai.Content{
-			// gemma-3-27b-it does not allow system prompt
-			{
-				Role: "user",
+			SystemInstruction: &genai.Content{
 				Parts: []*genai.Part{
 					{Text: systemPrompt},
 				},
 			},
+			Temperature:      &temperature,
+			TopK:             &topK,
+			TopP:             &topP,
+			MaxOutputTokens:  &maxOutputTokens,
+			ResponseMIMEType: "text/plain",
 		},
+		history: []*genai.Content{},
 	}
+
+	if c.model == "gemma-3-27b-it" {
+		// Note: gemma-3-27b-it does not allow system prompt
+		// xref: https://discuss.ai.google.dev/t/gemma-3-missing-features-despite-announcement/71692
+		// TODO: remove this hack once gemma-3-27b-it supports system prompt
+		chat.genConfig.SystemInstruction = nil
+		chat.history = []*genai.Content{
+			{Role: "user", Parts: []*genai.Part{{Text: systemPrompt}}},
+		}
+	}
+
+	if c.responseSchema != nil {
+		chat.genConfig.ResponseSchema = c.responseSchema
+		chat.genConfig.ResponseMIMEType = "application/json"
+	}
+	return chat
 }
 
 // GeminiChat is a chat with the model.
@@ -266,7 +257,6 @@ func (c *GeminiChat) Send(ctx context.Context, contents ...any) (ChatResponse, e
 		switch v := content.(type) {
 		case string:
 			genaiContent.Parts = append(genaiContent.Parts, &genai.Part{Text: v})
-			c.history = append(c.history, genaiContent)
 		case FunctionCallResult:
 			genaiContent.Parts = append(genaiContent.Parts, &genai.Part{
 				FunctionResponse: &genai.FunctionResponse{
@@ -275,11 +265,11 @@ func (c *GeminiChat) Send(ctx context.Context, contents ...any) (ChatResponse, e
 					Response: v.Result,
 				},
 			})
-			c.history = append(c.history, genaiContent)
 		default:
 			return nil, fmt.Errorf("unexpected type of content: %T", content)
 		}
 	}
+	c.history = append(c.history, genaiContent)
 	result, err := c.client.Models.GenerateContent(ctx, c.model, c.history, c.genConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate content: %w", err)
@@ -307,16 +297,6 @@ func (r *GeminiChatResponse) MarshalJSON() ([]byte, error) {
 
 // String returns a string representation of the response.
 func (r *GeminiChatResponse) String() string {
-	// var response strings.Builder
-	// response.WriteString("{candidates=[")
-	// for i, candidate := range r.Candidates() {
-	// 	if i > 0 {
-	// 		response.WriteString(", ")
-	// 	}
-	// 	response.WriteString(candidate.String())
-	// }
-	// response.WriteString("]}")
-	// return response.String()
 	return r.geminiResponse.Text()
 }
 
@@ -329,7 +309,6 @@ func (r *GeminiChatResponse) UsageMetadata() any {
 func (r *GeminiChatResponse) Candidates() []Candidate {
 	var candidates []Candidate
 	for _, candidate := range r.geminiResponse.Candidates {
-		// klog.Infof("candidate: %+v", candidate)
 		candidates = append(candidates, &GeminiCandidate{candidate: candidate})
 	}
 	return candidates
@@ -394,13 +373,13 @@ func (p *GeminiPart) AsText() (string, bool) {
 // AsFunctionCalls returns the function calls of the part.
 func (p *GeminiPart) AsFunctionCalls() ([]FunctionCall, bool) {
 	if p.part.FunctionCall != nil {
-		var ret []FunctionCall
-		ret = append(ret, FunctionCall{
-			ID:        p.part.FunctionCall.ID,
-			Name:      p.part.FunctionCall.Name,
-			Arguments: p.part.FunctionCall.Args,
-		})
-		return ret, true
+		return []FunctionCall{
+			{
+				ID:        p.part.FunctionCall.ID,
+				Name:      p.part.FunctionCall.Name,
+				Arguments: p.part.FunctionCall.Args,
+			},
+		}, true
 	}
 	return nil, false
 }
