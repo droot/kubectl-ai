@@ -33,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/journal"
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/tools"
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/ui"
+	"github.com/chzyer/readline"
 
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/yaml"
@@ -336,7 +337,7 @@ type session struct {
 func (s *session) repl(ctx context.Context, initialQuery string) error {
 	query := initialQuery
 	if query == "" {
-		s.doc.AddBlock(ui.NewAgentTextBlock().SetText("Hey there, what can I help you with today?"))
+		s.doc.AddBlock(ui.NewAgentTextBlock().SetText("Hey there, what can I help you with today ?"))
 	}
 	for {
 		if query == "" {
@@ -345,9 +346,7 @@ func (s *session) repl(ctx context.Context, initialQuery string) error {
 
 			userInput, err := input.Observable().Wait()
 			if err != nil {
-				if err == io.EOF {
-					// Use hit control-D, or was piping and we reached the end of stdin.
-					// Not a "big" problem
+				if err == readline.ErrInterrupt || err == io.EOF {
 					return nil
 				}
 				return fmt.Errorf("reading input: %w", err)

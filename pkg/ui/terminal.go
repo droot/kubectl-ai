@@ -15,17 +15,18 @@
 package ui
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/journal"
 	"github.com/charmbracelet/glamour"
+	"github.com/chzyer/readline"
 	"k8s.io/klog/v2"
 )
 
@@ -39,6 +40,8 @@ type TerminalUI struct {
 	currentBlock Block
 	// currentBlockText is text of the currentBlock that we have already rendered to the screen
 	currentBlockText string
+
+	rl *readline.Instance
 
 	// This is useful in cases where stdin is already been used for providing the input to the agent (caller in this case)
 	// in such cases, stdin is already consumed and closed and reading input results in IO error.
@@ -62,6 +65,32 @@ func NewTerminalUI(doc *Document, journal journal.Recorder, useTTYForInput bool)
 	subscription := doc.AddSubscription(u)
 	u.subscription = subscription
 
+	var reader io.ReadCloser
+	var writer io.Writer = os.Stdout // Default writer
+	if useTTYForInput {
+		// Stdin was used for piped data, open the terminal directly
+		tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+		if err != nil {
+			return nil, fmt.Errorf("error opening /dev/tty: %w", err)
+		}
+		// defer tty.Close() // Don't close tty here, readline needs it
+		reader = tty
+		// writer = tty // Use tty for writer as well
+		// writer = os.Stdout
+	} else {
+		reader = os.Stdin
+		// writer remains os.Stdout
+	}
+
+	u.rl, err = readline.NewEx(&readline.Config{
+		Prompt:      "> ",
+		Stdin:       reader,
+		Stdout:      writer, // Use tty or os.Stdout
+		HistoryFile: filepath.Join(os.TempDir(), "kubectl-ai-history"),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("error initializing readline: %w", err)
+	}
 	return u, nil
 }
 
@@ -73,6 +102,10 @@ func (u *TerminalUI) Close() error {
 		} else {
 			u.subscription = nil
 		}
+	}
+	err := u.rl.Close()
+	if err != nil {
+		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
 }
@@ -112,47 +145,63 @@ func (u *TerminalUI) DocumentChanged(doc *Document, block Block) {
 		text = block.Text()
 		streaming = block.Streaming()
 	case *InputTextBlock:
-		fmt.Print("\n>>> ")
-		var reader *bufio.Reader
-		if u.useTTYForInput {
-			// Stdin was used for piped data, open the terminal directly
-			tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
-			if err != nil {
-				block.Observable().Set("", err)
-				return
-			}
-			defer tty.Close()
-			reader = bufio.NewReader(tty)
-		} else {
-			reader = bufio.NewReader(os.Stdin)
-		}
-		query, err := reader.ReadString('\n')
+		// u.rl.SetPrompt("> ")
+		block.Observable().Set(">", nil)
+		// fmt.Printf("> ")
+		query, err := u.rl.Readline()
 		if err != nil {
 			block.Observable().Set("", err)
-		} else {
-			block.Observable().Set(query, nil)
+			if err == readline.ErrInterrupt || err == io.EOF {
+				return
+			} else {
+				fmt.Printf("error reading input: %v\n", err)
+			}
+			return
 		}
+		block.Observable().Set(query, nil)
 		return
+		// var reader *bufio.Reader
+		// if u.useTTYForInput {
+		// 	// Stdin was used for piped data, open the terminal directly
+		// 	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+		// 	if err != nil {
+		// 		block.Observable().Set("", err)
+		// 		return
+		// 	}
+		// 	defer tty.Close()
+		// 	reader = bufio.NewReader(tty)
+		// } else {
+		// 	reader = bufio.NewReader(os.Stdin)
+		// }
+		// query, err := reader.ReadString('\n')
+		// if err != nil {
+		// 	block.Observable().Set("", err)
+		// } else {
+		// 	block.Observable().Set(query, nil)
+		// }
+		// return
 
 	case *InputOptionBlock:
 		fmt.Printf("%s\n", block.Prompt)
-		var reader *bufio.Reader
-		if u.useTTYForInput {
-			tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
-			if err != nil {
-				block.Observable().Set("", err)
-				return
-			}
-			defer tty.Close()
-			reader = bufio.NewReader(tty)
-		} else {
-			reader = bufio.NewReader(os.Stdin)
-		}
+		// var reader *bufio.Reader
+		// if u.useTTYForInput {
+		// 	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+		// 	if err != nil {
+		// 		block.Observable().Set("", err)
+		// 		return
+		// 	}
+		// 	defer tty.Close()
+		// 	reader = bufio.NewReader(tty)
+		// } else {
+		// 	reader = bufio.NewReader(os.Stdin)
+		// }
+
+		u.rl.SetPrompt("  Enter your choice (number): ")
 
 		for {
-			fmt.Print("  Enter your choice (number): ")
+			// fmt.Print("  Enter your choice (number): ")
 			var response string
-			response, err := reader.ReadString('\n')
+			response, err := u.rl.Readline()
 			if err != nil {
 				block.Observable().Set("", err)
 				break
@@ -167,6 +216,7 @@ func (u *TerminalUI) DocumentChanged(doc *Document, block Block) {
 
 			// If not returned, the choice was invalid
 			fmt.Printf("  Invalid choice. Please enter one of: %s\n", strings.Join(block.Options, ", "))
+			// u.rl.Refresh() // Removed
 			continue
 		}
 		return
@@ -267,5 +317,5 @@ func (u *TerminalUI) RenderOutput(ctx context.Context, s string, styleOptions ..
 }
 
 func (u *TerminalUI) ClearScreen() {
-	fmt.Print("\033[H\033[2J")
+	readline.ClearScreen(os.Stdout)
 }
