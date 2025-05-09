@@ -181,7 +181,7 @@ kubectl-ai --llm-provider=openai --model=gpt-4.1 --quiet "scale the nginx deploy
 
 The `kubectl-ai` will process your query, execute the appropriate kubectl commands, and provide you with the results and explanations.
 
-# MCP server
+## MCP server
 
 You can also use `kubectl-ai` as a MCP server that exposes `kubectl` as one of the tools to interact with locally configured k8s environment. See [mcp docs](./docs/mcp.md) for more details.
 
