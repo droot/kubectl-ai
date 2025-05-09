@@ -1,6 +1,6 @@
 # `kubectl-ai` as a MCP Server
 
-`kubectl-ai` can ack as a [Model Context Protocol (MCP)](https://github.com/modelcontextprotocol) server. This allows AI agents and IDEs to act as MCP clients and connect to the `kubectl-ai` MCP server, effectively interacting with your local Kubernetes environment via `kubectl`.
+`kubectl-ai` can act as a [Model Context Protocol (MCP)](https://github.com/modelcontextprotocol) server. This allows MCP clients such as AI agents and IDEs (Claude, Cursor) to connect to the `kubectl-ai` MCP server, effectively interacting with your local Kubernetes environment via `kubectl`.
 
 ## Overview
 
