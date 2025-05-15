@@ -25,7 +25,7 @@ dev/tasks/generate-github-actions.sh
 
 changes=$(git status --porcelain)
 if [[ -n "${changes}" ]]; then
-  echo "FAIL: Changes detected from dev/tasks/generate-github-actions:"
+  echo "FAIL: Changes detected from dev/tasks/generate-github-actions.sh:"
   git diff | head -n60
   echo "${changes}"
   exit 1
