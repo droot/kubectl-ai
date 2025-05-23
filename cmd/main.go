@@ -18,6 +18,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -25,6 +26,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -95,7 +97,7 @@ type Options struct {
 	ExtraPromptPaths       []string `json:"extraPromptPaths,omitempty"`
 	TracePath              string   `json:"tracePath,omitempty"`
 	RemoveWorkDir          bool     `json:"removeWorkDir,omitempty"`
-	ToolConfigPath         []string `json:"toolConfigPath,omitempty"`
+	ToolConfigPaths        []string `json:"toolConfigPaths,omitempty"`
 
 	// UserInterface is the type of user interface to use.
 	UserInterface UserInterface `json:"userInterface,omitempty"`
@@ -130,6 +132,16 @@ func (u *UserInterface) Type() string {
 	return "UserInterface"
 }
 
+var defaultToolConfigPaths = []string{
+	filepath.Join("{CONFIG}", "kubectl-ai", "tools.yaml"),
+	filepath.Join("{HOME}", ".config", "kubectl-ai", "tools.yaml"),
+}
+
+var defaultConfigPaths = []string{
+	filepath.Join("{CONFIG}", "kubectl-ai", "config.yaml"),
+	filepath.Join("{HOME}", ".config", "kubectl-ai", "config.yaml"),
+}
+
 func (o *Options) InitDefaults() {
 	o.ProviderID = "gemini"
 	o.ModelID = "gemini-2.5-pro-preview-03-25"
@@ -147,11 +159,7 @@ func (o *Options) InitDefaults() {
 	o.ExtraPromptPaths = []string{}
 	o.TracePath = filepath.Join(os.TempDir(), "kubectl-ai-trace.txt")
 	o.RemoveWorkDir = false
-	o.ToolConfigPath = []string{
-		filepath.Join("{CONFIG}", "kubectl-ai", "tools.yaml"),
-		filepath.Join("{HOME}", ".config", "kubectl-ai", "tools.yaml"),
-	}
-
+	o.ToolConfigPaths = defaultToolConfigPaths
 	// Default to terminal UI
 	o.UserInterface = UserInterfaceTerminal
 
@@ -167,35 +175,32 @@ func (o *Options) LoadConfiguration(b []byte) error {
 }
 
 func (o *Options) LoadConfigurationFile() error {
-	configPaths := []string{
-		filepath.Join("{CONFIG}", "kubectl-ai", "config.yaml"),
-		filepath.Join("{HOME}", ".config", "kubectl-ai", "config.yaml"),
-	}
-
+	configPaths := defaultConfigPaths
 	for _, configPath := range configPaths {
-		// Try to load configuration
-		tokens := strings.Split(configPath, string(os.PathSeparator))
-		for i, token := range tokens {
-			if token == "{CONFIG}" {
-				configDir, err := os.UserConfigDir()
-				if err != nil {
-					return fmt.Errorf("getting user config directory: %w", err)
-				}
-				tokens[i] = configDir
+		pathWithPlaceholdersExpanded := configPath
+
+		if strings.Contains(pathWithPlaceholdersExpanded, "{CONFIG}") {
+			configDir, err := os.UserConfigDir()
+			if err != nil {
+				return fmt.Errorf("getting user config directory (for config file path %q): %w", configPath, err)
 			}
-			if token == "{HOME}" {
-				homeDir, err := os.UserHomeDir()
-				if err != nil {
-					return fmt.Errorf("getting user home directory: %w", err)
-				}
-				tokens[i] = homeDir
-			}
+			pathWithPlaceholdersExpanded = strings.ReplaceAll(pathWithPlaceholdersExpanded, "{CONFIG}", configDir)
 		}
-		configPath = filepath.Join(tokens...)
+
+		if strings.Contains(pathWithPlaceholdersExpanded, "{HOME}") {
+			homeDir, err := os.UserHomeDir()
+			if err != nil {
+				return fmt.Errorf("getting user home directory (for config file path %q): %w", configPath, err)
+			}
+			pathWithPlaceholdersExpanded = strings.ReplaceAll(pathWithPlaceholdersExpanded, "{HOME}", homeDir)
+		}
+
+		configPath = filepath.Clean(pathWithPlaceholdersExpanded)
 		configBytes, err := os.ReadFile(configPath)
 		if err != nil {
-			if os.IsNotExist(err) {
-				// ignore
+			if os.IsNotExist(err) && !slices.Contains(defaultConfigPaths, configPath) {
+				// user specified config file does not exist
+				return fmt.Errorf("could not load config from %q: %w", configPath, err)
 			} else {
 				fmt.Fprintf(os.Stderr, "warning: could not load defaults from %q: %v\n", configPath, err)
 			}
@@ -206,7 +211,6 @@ func (o *Options) LoadConfigurationFile() error {
 			}
 		}
 	}
-
 	return nil
 }
 
@@ -281,7 +285,7 @@ func (opt *Options) bindCLIFlags(f *pflag.FlagSet) error {
 	f.StringVar(&opt.ModelID, "model", opt.ModelID, "language model e.g. gemini-2.0-flash-thinking-exp-01-21, gemini-2.0-flash")
 	f.BoolVar(&opt.SkipPermissions, "skip-permissions", opt.SkipPermissions, "(dangerous) skip asking for confirmation before executing kubectl commands that modify resources")
 	f.BoolVar(&opt.MCPServer, "mcp-server", opt.MCPServer, "run in MCP server mode")
-	f.StringArrayVar(&opt.ToolConfigPath, "custom-tools-config", opt.ToolConfigPath, "path to custom tools config file")
+	f.StringArrayVar(&opt.ToolConfigPaths, "custom-tools-config", opt.ToolConfigPaths, "path to custom tools config file or directory")
 	f.BoolVar(&opt.EnableToolUseShim, "enable-tool-use-shim", opt.EnableToolUseShim, "enable tool use shim")
 	f.BoolVar(&opt.Quiet, "quiet", opt.Quiet, "run in non-interactive mode, requires a query to be provided as a positional argument")
 
@@ -305,30 +309,8 @@ func RunRootCommand(ctx context.Context, opt Options, args []string) error {
 		}
 	}
 
-	// Load and register custom tools from config files and dirs
-	for _, path := range opt.ToolConfigPath {
-		tokens := strings.Split(path, string(os.PathSeparator))
-		for i, token := range tokens {
-			if token == "{CONFIG}" {
-				configDir, err := os.UserConfigDir()
-				if err != nil {
-					return fmt.Errorf("getting user config directory: %w", err)
-				}
-				tokens[i] = configDir
-			}
-			if token == "{HOME}" {
-				homeDir, err := os.UserHomeDir()
-				if err != nil {
-					return fmt.Errorf("getting user home directory: %w", err)
-				}
-				tokens[i] = homeDir
-			}
-		}
-
-		if err := tools.LoadAndRegisterCustomTools(filepath.Join(tokens...)); err != nil {
-			// Log the error but continue execution, as custom tools are optional
-			klog.Warningf("Failed to load or register custom tools (path: %q): %v", opt.ToolConfigPath, err)
-		}
+	if err := handleCustomTools(opt.ToolConfigPaths); err != nil {
+		return fmt.Errorf("failed to process custom tools: %w", err)
 	}
 
 	// After reading stdin, it is consumed
@@ -444,6 +426,45 @@ func RunRootCommand(ctx context.Context, opt Options, args []string) error {
 	}
 
 	return chatSession.repl(ctx, queryFromCmd)
+}
+
+func handleCustomTools(toolConfigPaths []string) error {
+	// resolve tool config paths, and then load and register custom tools from config files and dirs
+	for _, path := range toolConfigPaths {
+		pathWithPlaceholdersExpanded := path
+
+		if strings.Contains(pathWithPlaceholdersExpanded, "{CONFIG}") {
+			configDir, err := os.UserConfigDir()
+			if err != nil {
+				klog.Warningf("Failed to get user config directory for tools path %q: %v", path, err)
+				continue
+			}
+			pathWithPlaceholdersExpanded = strings.ReplaceAll(pathWithPlaceholdersExpanded, "{CONFIG}", configDir)
+		}
+
+		if strings.Contains(pathWithPlaceholdersExpanded, "{HOME}") {
+			homeDir, err := os.UserHomeDir()
+			if err != nil {
+				klog.Warningf("Failed to get user home directory for tools path %q: %v", path, err)
+				continue
+			}
+			pathWithPlaceholdersExpanded = strings.ReplaceAll(pathWithPlaceholdersExpanded, "{HOME}", homeDir)
+		}
+
+		cleanedPath := filepath.Clean(pathWithPlaceholdersExpanded)
+
+		klog.Infof("Attempting to load custom tools from processed path: %q (original value from config: %q)", cleanedPath, path)
+
+		if err := tools.LoadAndRegisterCustomTools(cleanedPath); err != nil {
+			if errors.Is(err, os.ErrNotExist) && !slices.Contains(defaultToolConfigPaths, path) {
+				// user specified a directory that does not exist, we must error out
+				return fmt.Errorf("custom tools directory not found (original value: %q, processed path: %q)", path, cleanedPath)
+			} else {
+				klog.Warningf("Failed to load or register custom tools (original value: %q, processed path: %q): %v", path, cleanedPath, err)
+			}
+		}
+	}
+	return nil
 }
 
 // session represents the user chat session (interactive/non-interactive both)
