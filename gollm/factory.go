@@ -328,6 +328,14 @@ func (rc *retryChat[C]) Send(ctx context.Context, contents ...any) (ChatResponse
 	return Retry[ChatResponse](ctx, rc.config, rc.underlying.IsRetryableError, operation)
 }
 
+func (rc *retryChat[C]) LoadHistory(ctx context.Context, filename string) error {
+	return rc.underlying.LoadHistory(ctx, filename)
+}
+
+func (rc *retryChat[C]) SaveHistory(ctx context.Context, filename string) error {
+	return rc.underlying.SaveHistory(ctx, filename)
+}
+
 // Embed implements the Client interface for the retryClient decorator.
 func (rc *retryChat[C]) SendStreaming(ctx context.Context, contents ...any) (ChatResponseIterator, error) {
 	return rc.underlying.SendStreaming(ctx, contents...)

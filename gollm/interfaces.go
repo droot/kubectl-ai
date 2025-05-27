@@ -27,7 +27,7 @@ type Client interface {
 	io.Closer
 
 	// StartChat starts a new multi-turn chat with a language model.
-	StartChat(systemPrompt, model string) Chat
+	StartChat(ctx context.Context, systemPrompt, model string, historyFile string) Chat
 
 	// GenerateCompletion generates a single completion for a given prompt.
 	GenerateCompletion(ctx context.Context, req *CompletionRequest) (CompletionResponse, error)
@@ -50,6 +50,12 @@ type Chat interface {
 
 	// SendStreaming is the streaming version of Send.
 	SendStreaming(ctx context.Context, contents ...any) (ChatResponseIterator, error)
+
+	// SaveHistory saves the history of the chat to a file.
+	SaveHistory(ctx context.Context, filename string) error
+
+	// LoadHistory loads the history of the chat from a file.
+	LoadHistory(ctx context.Context, filename string) error
 
 	// SetFunctionDefinitions configures the set of tools (functions) available to the LLM
 	// for function calling.

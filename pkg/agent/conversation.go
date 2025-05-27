@@ -90,7 +90,7 @@ func (s *Conversation) Init(ctx context.Context, doc *ui.Document) error {
 
 	// Start a new chat session
 	s.llmChat = gollm.NewRetryChat(
-		s.LLM.StartChat(systemPrompt, s.Model),
+		s.LLM.StartChat(ctx, systemPrompt, s.Model, "/tmp/kubectl-ai-chat-history.json"),
 		gollm.RetryConfig{
 			MaxAttempts:    3,
 			InitialBackoff: 10 * time.Second,
@@ -154,6 +154,10 @@ func (a *Conversation) RunOneRound(ctx context.Context, query string) error {
 			Payload:   []any{currChatContent},
 		})
 
+		if err := a.llmChat.SaveHistory(ctx, "/tmp/kubectl-ai-chat-history.json"); err != nil {
+			return fmt.Errorf("saving chat history: %w", err)
+		}
+
 		stream, err := a.llmChat.SendStreaming(ctx, currChatContent...)
 		if err != nil {
 			return err
@@ -176,6 +180,7 @@ func (a *Conversation) RunOneRound(ctx context.Context, query string) error {
 
 		var agentTextBlock *ui.AgentTextBlock
 
+		responseHasText := false
 		for response, err := range stream {
 			if err != nil {
 				return fmt.Errorf("reading streaming LLM response: %w", err)
@@ -192,8 +197,7 @@ func (a *Conversation) RunOneRound(ctx context.Context, query string) error {
 			})
 
 			if len(response.Candidates()) == 0 {
-				log.Error(nil, "No candidates in response")
-				return fmt.Errorf("no candidates in LLM response")
+				continue
 			}
 
 			candidate := response.Candidates()[0]
@@ -208,6 +212,9 @@ func (a *Conversation) RunOneRound(ctx context.Context, query string) error {
 						a.doc.AddBlock(agentTextBlock)
 					}
 					agentTextBlock.AppendText(text)
+					if len(text) > 0 {
+						responseHasText = true
+					}
 				}
 
 				// Check if it's a function call
@@ -220,6 +227,20 @@ func (a *Conversation) RunOneRound(ctx context.Context, query string) error {
 
 		if agentTextBlock != nil {
 			agentTextBlock.SetStreaming(false)
+		}
+
+		if !responseHasText && len(functionCalls) == 0 {
+			log.Error(nil, "No text or function calls were returned from LLM")
+			return fmt.Errorf("empty response from LLM")
+		}
+
+		// If no function calls were made, we're done
+		if len(functionCalls) == 0 {
+			log.Info("No function calls were made, so most likely the task is completed, so we're done.")
+			if err := a.llmChat.SaveHistory(ctx, "/tmp/kubectl-ai-chat-history.json"); err != nil {
+				return fmt.Errorf("saving chat history: %w", err)
+			}
+			return nil
 		}
 
 		// TODO(droot): Run all function calls in parallel
@@ -305,12 +326,6 @@ func (a *Conversation) RunOneRound(ctx context.Context, query string) error {
 					Result: result,
 				})
 			}
-		}
-
-		// If no function calls were made, we're done
-		if len(functionCalls) == 0 {
-			log.Info("No function calls were made, so most likely the task is completed, so we're done.")
-			return nil
 		}
 
 		currentIteration++

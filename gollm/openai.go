@@ -135,7 +135,9 @@ func (c *OpenAIClient) Close() error {
 }
 
 // StartChat starts a new chat session.
-func (c *OpenAIClient) StartChat(systemPrompt, model string) Chat {
+func (c *OpenAIClient) StartChat(ctx context.Context, systemPrompt, model string, historyFile string) Chat {
+	log := klog.FromContext(ctx)
+
 	// Get the model to use for this chat
 	selectedModel := getOpenAIModel(model)
 
@@ -147,12 +149,19 @@ func (c *OpenAIClient) StartChat(systemPrompt, model string) Chat {
 		history = append(history, openai.SystemMessage(systemPrompt))
 	}
 
-	return &openAIChatSession{
+	chat := &openAIChatSession{
 		client:  c.client,
 		history: history,
 		model:   selectedModel,
-		// functionDefinitions and tools will be set later via SetFunctionDefinitions
 	}
+
+	if historyFile != "" {
+		if err := chat.LoadHistory(ctx, historyFile); err != nil {
+			log.Error(err, "failed to load history from file", "historyFile", historyFile)
+		}
+	}
+
+	return chat
 }
 
 // simpleCompletionResponse is a basic implementation of CompletionResponse.
@@ -231,6 +240,30 @@ type openAIChatSession struct {
 	model               string
 	functionDefinitions []*FunctionDefinition            // Stored in gollm format
 	tools               []openai.ChatCompletionToolParam // Stored in OpenAI format
+}
+
+func (cs *openAIChatSession) SaveHistory(ctx context.Context, filename string) error {
+	historyJSON, err := json.Marshal(cs.history)
+	if err != nil {
+		return fmt.Errorf("marshaling history: %w", err)
+	}
+
+	if err := os.WriteFile(filename, historyJSON, 0600); err != nil {
+		return fmt.Errorf("writing history to file: %w", err)
+	}
+	return nil
+}
+
+func (cs *openAIChatSession) LoadHistory(ctx context.Context, filename string) error {
+	historyJSON, err := os.ReadFile(filename)
+	if err != nil {
+		return fmt.Errorf("reading history from file: %w", err)
+	}
+
+	if err := json.Unmarshal(historyJSON, &cs.history); err != nil {
+		return fmt.Errorf("unmarshaling history: %w", err)
+	}
+	return nil
 }
 
 // Ensure openAIChatSession implements the Chat interface.

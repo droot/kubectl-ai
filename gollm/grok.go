@@ -83,7 +83,9 @@ func (c *GrokClient) Close() error {
 }
 
 // StartChat starts a new chat session.
-func (c *GrokClient) StartChat(systemPrompt, model string) Chat {
+func (c *GrokClient) StartChat(ctx context.Context, systemPrompt, model string, historyFile string) Chat {
+	log := klog.FromContext(ctx)
+
 	// Default to Grok-3-beta if no model is specified
 	if model == "" {
 		model = "grok-3-beta"
@@ -97,11 +99,19 @@ func (c *GrokClient) StartChat(systemPrompt, model string) Chat {
 		history = append(history, openai.SystemMessage(systemPrompt))
 	}
 
-	return &grokChatSession{
+	chat := &grokChatSession{
 		client:  c.client,
 		history: history,
 		model:   model,
 	}
+
+	if historyFile != "" {
+		if err := chat.LoadHistory(ctx, historyFile); err != nil {
+			log.Error(err, "failed to load history from file", "historyFile", historyFile)
+		}
+	}
+
+	return chat
 }
 
 // simpleGrokCompletionResponse is a basic implementation of CompletionResponse.
@@ -172,6 +182,35 @@ type grokChatSession struct {
 	model               string
 	functionDefinitions []*FunctionDefinition            // Stored in gollm format
 	tools               []openai.ChatCompletionToolParam // Stored in OpenAI format
+}
+
+func (c *grokChatSession) SaveHistory(ctx context.Context, filename string) error {
+	history := c.history
+	historyJSON, err := json.Marshal(history)
+	if err != nil {
+		return fmt.Errorf("marshaling history: %w", err)
+	}
+
+	if err := os.WriteFile(filename, historyJSON, 0644); err != nil {
+		return fmt.Errorf("writing history to file: %w", err)
+	}
+
+	return nil
+}
+
+func (c *grokChatSession) LoadHistory(ctx context.Context, filename string) error {
+	historyJSON, err := os.ReadFile(filename)
+	if err != nil {
+		return fmt.Errorf("reading history from file: %w", err)
+	}
+
+	var history []openai.ChatCompletionMessageParamUnion
+	if err := json.Unmarshal(historyJSON, &history); err != nil {
+		return fmt.Errorf("unmarshaling history: %w", err)
+	}
+
+	c.history = history
+	return nil
 }
 
 // Ensure grokChatSession implements the Chat interface.

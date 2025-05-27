@@ -249,7 +249,9 @@ func (c *GoogleAIClient) GenerateCompletion(ctx context.Context, request *Comple
 }
 
 // StartChat starts a new chat with the model.
-func (c *GoogleAIClient) StartChat(systemPrompt string, model string) Chat {
+func (c *GoogleAIClient) StartChat(ctx context.Context, systemPrompt string, model string, historyFile string) Chat {
+	log := klog.FromContext(ctx)
+
 	// Some values that are recommended by aistudio
 	temperature := float32(1.0)
 	topK := float32(40)
@@ -288,6 +290,13 @@ func (c *GoogleAIClient) StartChat(systemPrompt string, model string) Chat {
 		chat.genConfig.ResponseSchema = c.responseSchema
 		chat.genConfig.ResponseMIMEType = "application/json"
 	}
+
+	if historyFile != "" {
+		if err := chat.LoadHistory(ctx, historyFile); err != nil {
+			log.Error(err, "failed to load history from file", "historyFile", historyFile)
+		}
+	}
+
 	return chat
 }
 
@@ -320,6 +329,35 @@ func (c *GeminiChat) SetFunctionDefinitions(functionDefinitions []*FunctionDefin
 			FunctionDeclarations: genaiFunctionDeclarations,
 		},
 	}
+	return nil
+}
+
+func (c *GeminiChat) SaveHistory(ctx context.Context, filename string) error {
+	history := c.history
+	historyJSON, err := json.Marshal(history)
+	if err != nil {
+		return fmt.Errorf("marshaling history: %w", err)
+	}
+
+	if err := os.WriteFile(filename, historyJSON, 0644); err != nil {
+		return fmt.Errorf("writing history to file: %w", err)
+	}
+
+	return nil
+}
+
+func (c *GeminiChat) LoadHistory(ctx context.Context, filename string) error {
+	historyJSON, err := os.ReadFile(filename)
+	if err != nil {
+		return fmt.Errorf("reading history from file: %w", err)
+	}
+
+	var history []*genai.Content
+	if err := json.Unmarshal(historyJSON, &history); err != nil {
+		return fmt.Errorf("unmarshaling history: %w", err)
+	}
+
+	c.history = history
 	return nil
 }
 

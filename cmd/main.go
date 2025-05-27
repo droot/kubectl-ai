@@ -195,19 +195,19 @@ func (o *Options) LoadConfigurationFile() error {
 			pathWithPlaceholdersExpanded = strings.ReplaceAll(pathWithPlaceholdersExpanded, "{HOME}", homeDir)
 		}
 
-		configPath = filepath.Clean(pathWithPlaceholdersExpanded)
-		configBytes, err := os.ReadFile(configPath)
+		cleanPath := filepath.Clean(pathWithPlaceholdersExpanded)
+		configBytes, err := os.ReadFile(cleanPath)
 		if err != nil {
 			if os.IsNotExist(err) && !slices.Contains(defaultConfigPaths, configPath) {
 				// user specified config file does not exist
 				return fmt.Errorf("could not load config from %q: %w", configPath, err)
 			} else {
-				fmt.Fprintf(os.Stderr, "warning: could not load defaults from %q: %v\n", configPath, err)
+				klog.Warningf("could not load defaults from %q: %v", configPath, err)
 			}
 		}
 		if len(configBytes) > 0 {
 			if err := o.LoadConfiguration(configBytes); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: error loading configuration from %q: %v\n", configPath, err)
+				klog.Warningf("error loading configuration from %q: %v", configPath, err)
 			}
 		}
 	}

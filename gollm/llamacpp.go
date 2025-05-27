@@ -160,8 +160,10 @@ func (c *LlamaCppClient) SetResponseSchema(responseSchema *Schema) error {
 	return nil
 }
 
-func (c *LlamaCppClient) StartChat(systemPrompt, model string) Chat {
-	return &LlamaCppChat{
+func (c *LlamaCppClient) StartChat(ctx context.Context, systemPrompt, model string, historyFile string) Chat {
+	log := klog.FromContext(ctx)
+
+	chat := &LlamaCppChat{
 		client: c,
 		model:  model,
 		history: []llamacppChatMessage{
@@ -171,6 +173,14 @@ func (c *LlamaCppClient) StartChat(systemPrompt, model string) Chat {
 			},
 		},
 	}
+
+	if historyFile != "" {
+		if err := chat.LoadHistory(ctx, historyFile); err != nil {
+			log.Error(err, "failed to load history from file", "historyFile", historyFile)
+		}
+	}
+
+	return chat
 }
 
 type LlamaCppCompletionResponse struct {
@@ -277,6 +287,35 @@ func (c *LlamaCppChat) Send(ctx context.Context, contents ...any) (ChatResponse,
 	}
 
 	return llmacppResponse, nil
+}
+
+func (c *LlamaCppChat) SaveHistory(ctx context.Context, filename string) error {
+	history := c.history
+	historyJSON, err := json.Marshal(history)
+	if err != nil {
+		return fmt.Errorf("marshaling history: %w", err)
+	}
+
+	if err := os.WriteFile(filename, historyJSON, 0644); err != nil {
+		return fmt.Errorf("writing history to file: %w", err)
+	}
+
+	return nil
+}
+
+func (c *LlamaCppChat) LoadHistory(ctx context.Context, filename string) error {
+	historyJSON, err := os.ReadFile(filename)
+	if err != nil {
+		return fmt.Errorf("reading history from file: %w", err)
+	}
+
+	var history []llamacppChatMessage
+	if err := json.Unmarshal(historyJSON, &history); err != nil {
+		return fmt.Errorf("unmarshaling history: %w", err)
+	}
+
+	c.history = history
+	return nil
 }
 
 func (c *LlamaCppChat) SendStreaming(ctx context.Context, contents ...any) (ChatResponseIterator, error) {

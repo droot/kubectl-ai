@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 
 	"github.com/ollama/ollama/api"
 	"github.com/ollama/ollama/envconfig"
@@ -109,8 +110,10 @@ func (c *OllamaClient) SetResponseSchema(schema *Schema) error {
 	return nil
 }
 
-func (c *OllamaClient) StartChat(systemPrompt, model string) Chat {
-	return &OllamaChat{
+func (c *OllamaClient) StartChat(ctx context.Context, systemPrompt, model string, historyFile string) Chat {
+	log := klog.FromContext(ctx)
+
+	chat := &OllamaChat{
 		client: c.client,
 		model:  model,
 		history: []api.Message{
@@ -120,6 +123,14 @@ func (c *OllamaClient) StartChat(systemPrompt, model string) Chat {
 			},
 		},
 	}
+
+	if historyFile != "" {
+		if err := chat.LoadHistory(ctx, historyFile); err != nil {
+			log.Error(err, "failed to load history from file", "historyFile", historyFile)
+		}
+	}
+
+	return chat
 }
 
 type OllamaCompletionResponse struct {
@@ -191,6 +202,35 @@ func (c *OllamaChat) Send(ctx context.Context, contents ...any) (ChatResponse, e
 
 	log.Info("ollama response", "parsed_response", ollamaResponse)
 	return ollamaResponse, nil
+}
+
+func (c *OllamaChat) SaveHistory(ctx context.Context, filename string) error {
+	history := c.history
+	historyJSON, err := json.Marshal(history)
+	if err != nil {
+		return fmt.Errorf("marshaling history: %w", err)
+	}
+
+	if err := os.WriteFile(filename, historyJSON, 0644); err != nil {
+		return fmt.Errorf("writing history to file: %w", err)
+	}
+
+	return nil
+}
+
+func (c *OllamaChat) LoadHistory(ctx context.Context, filename string) error {
+	historyJSON, err := os.ReadFile(filename)
+	if err != nil {
+		return fmt.Errorf("reading history from file: %w", err)
+	}
+
+	var history []api.Message
+	if err := json.Unmarshal(historyJSON, &history); err != nil {
+		return fmt.Errorf("unmarshaling history: %w", err)
+	}
+
+	c.history = history
+	return nil
 }
 
 func (c *OllamaChat) IsRetryableError(err error) bool {

@@ -201,14 +201,24 @@ func (c *AzureOpenAIClient) SetResponseSchema(schema *Schema) error {
 	return nil
 }
 
-func (c *AzureOpenAIClient) StartChat(systemPrompt string, model string) Chat {
-	return &AzureOpenAIChat{
+func (c *AzureOpenAIClient) StartChat(ctx context.Context, systemPrompt, model string, historyFile string) Chat {
+	log := klog.FromContext(ctx)
+
+	chat := &AzureOpenAIChat{
 		client: c.client,
 		model:  model,
 		history: []azopenai.ChatRequestMessageClassification{
 			&azopenai.ChatRequestSystemMessage{Content: azopenai.NewChatRequestSystemMessageContent(systemPrompt)},
 		},
 	}
+
+	if historyFile != "" {
+		if err := chat.LoadHistory(ctx, historyFile); err != nil {
+			log.Error(err, "failed to load history from file", "historyFile", historyFile)
+		}
+	}
+
+	return chat
 }
 
 type AzureOpenAICompletionResponse struct {
@@ -228,6 +238,14 @@ type AzureOpenAIChat struct {
 	model   string
 	history []azopenai.ChatRequestMessageClassification
 	tools   []azopenai.ChatCompletionsToolDefinitionClassification
+}
+
+func (c *AzureOpenAIChat) SaveHistory(ctx context.Context, filename string) error {
+	return nil
+}
+
+func (c *AzureOpenAIChat) LoadHistory(ctx context.Context, filename string) error {
+	return nil
 }
 
 func (c *AzureOpenAIChat) Send(ctx context.Context, contents ...any) (ChatResponse, error) {
