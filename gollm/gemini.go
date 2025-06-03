@@ -43,7 +43,7 @@ func init() {
 
 // geminiFactory is the provider factory function for Gemini.
 // Supports ClientOptions for consistency, but skipVerifySSL is not used.
-func geminiFactory(ctx context.Context, opts ClientOptions) (Client, error) {
+func geminiFactory(ctx context.Context, opts Options) (Client, error) {
 	opt := GeminiAPIClientOptions{}
 	return NewGeminiAPIClient(ctx, opt)
 }
@@ -88,7 +88,7 @@ type VertexAIClientOptions struct {
 
 // vertexaiViaGeminiFactory is the provider factory function for VertexAI via Gemini.
 // Supports ClientOptions for consistency, but skipVerifySSL is not used.
-func vertexaiViaGeminiFactory(ctx context.Context, opts ClientOptions) (Client, error) {
+func vertexaiViaGeminiFactory(ctx context.Context, opts Options) (Client, error) {
 	opt := VertexAIClientOptions{}
 	return NewVertexAIClient(ctx, opt)
 }
@@ -479,9 +479,16 @@ func (r *GeminiChatResponse) String() string {
 	return r.geminiResponse.Text()
 }
 
-// UsageMetadata returns the usage metadata for the response.
-func (r *GeminiChatResponse) UsageMetadata() any {
-	return r.geminiResponse.UsageMetadata
+// Usage returns the token usage data for the response.
+func (r *GeminiChatResponse) Usage() UsageData {
+	if r.geminiResponse != nil && r.geminiResponse.UsageMetadata != nil {
+		return UsageData{
+			PromptTokens:     int(r.geminiResponse.UsageMetadata.PromptTokenCount),
+			CompletionTokens: int(r.geminiResponse.UsageMetadata.CandidatesTokenCount),
+			TotalTokens:      int(r.geminiResponse.UsageMetadata.TotalTokenCount),
+		}
+	}
+	return UsageData{}
 }
 
 // Candidates returns the candidates for the response.
@@ -503,24 +510,18 @@ type GeminiCandidate struct {
 func (r *GeminiCandidate) String() string {
 	var response strings.Builder
 	response.WriteString("[")
-	for i, parts := range r.Parts() {
+	for i, p := range r.Parts() {
 		if i > 0 {
 			response.WriteString(", ")
 		}
-		text, ok := parts.AsText()
-		if ok {
-			response.WriteString(text)
-		}
-		functionCalls, ok := parts.AsFunctionCalls()
-		if ok {
-			response.WriteString("functionCalls=[")
-			for _, functionCall := range functionCalls {
-				response.WriteString(fmt.Sprintf("%q(args=%v)", functionCall.Name, functionCall.Arguments))
-			}
-			response.WriteString("]}")
+		if tp, ok := p.(TextProducer); ok {
+			response.WriteString(tp.Text())
+		} else if fp, ok := p.(FunctionCallProducer); ok && fp.FunctionCall() != nil {
+			fc := fp.FunctionCall()
+			response.WriteString(fmt.Sprintf("functionCall={Name:%q Args:%v}", fc.Name, fc.Arguments))
 		}
 	}
-	response.WriteString("]}")
+	response.WriteString("]")
 	return response.String()
 }
 
@@ -529,7 +530,7 @@ func (r *GeminiCandidate) Parts() []Part {
 	var parts []Part
 	if r.candidate.Content != nil {
 		for _, part := range r.candidate.Content.Parts {
-			parts = append(parts, &GeminiPart{part: *part})
+			parts = append(parts, &GeminiPart{PartBase{}, *part}) // Embed PartBase
 		}
 	}
 	return parts
@@ -538,30 +539,35 @@ func (r *GeminiCandidate) Parts() []Part {
 // GeminiPart is a part of a candidate.
 // It implements the Part interface.
 type GeminiPart struct {
+	PartBase
 	part genai.Part
 }
 
-// AsText returns the text of the part.
-func (p *GeminiPart) AsText() (string, bool) {
+// Text returns the text content of the part.
+func (p *GeminiPart) Text() string {
 	if p.part.Text != "" {
-		return p.part.Text, true
+		return p.part.Text
 	}
-	return "", false
+	return ""
 }
 
-// AsFunctionCalls returns the function calls of the part.
-func (p *GeminiPart) AsFunctionCalls() ([]FunctionCall, bool) {
+// FunctionCall returns the function call if the part is one.
+func (p *GeminiPart) FunctionCall() *FunctionCall {
 	if p.part.FunctionCall != nil {
-		return []FunctionCall{
-			{
-				ID:        p.part.FunctionCall.ID,
-				Name:      p.part.FunctionCall.Name,
-				Arguments: p.part.FunctionCall.Args,
-			},
-		}, true
+		return &FunctionCall{
+			ID:        p.part.FunctionCall.ID,
+			Name:      p.part.FunctionCall.Name,
+			Arguments: p.part.FunctionCall.Args,
+		}
 	}
-	return nil, false
+	return nil
 }
+
+// FunctionCallResult returns nil as Gemini parts are not FunctionCallResults.
+func (p *GeminiPart) FunctionCallResult() *FunctionCallResult {
+	return nil
+}
+
 
 type GeminiCompletionResponse struct {
 	geminiResponse *genai.GenerateContentResponse

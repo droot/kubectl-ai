@@ -59,6 +59,20 @@ type Chat interface {
 	IsRetryableError(error) bool
 }
 
+// Options holds common options for initializing a new LLM client.
+type Options struct {
+	APIKey string
+	Model  string
+	// Add other common options here if needed by other providers
+}
+
+// UsageData holds token usage information for a request.
+type UsageData struct {
+	PromptTokens     int
+	CompletionTokens int
+	TotalTokens      int
+}
+
 // CompletionRequest is a request to generate a completion for a given prompt.
 type CompletionRequest struct {
 	Model  string `json:"model,omitempty"`
@@ -132,7 +146,7 @@ type FunctionCallResult struct {
 
 // ChatResponse is a generic chat response from the LLM.
 type ChatResponse interface {
-	UsageMetadata() any
+	Usage() UsageData // Changed from UsageMetadata() any
 
 	// Candidates are a set of candidate responses from the LLM.
 	// The LLM may return multiple candidates, and we can choose the best one.
@@ -141,6 +155,51 @@ type ChatResponse interface {
 
 // ChatResponseIterator is a streaming chat response from the LLM.
 type ChatResponseIterator iter.Seq2[ChatResponse, error]
+
+// ModelInfo describes an available language model.
+type ModelInfo struct {
+	Name        string
+	Description string
+	MaxTokens   int
+	Default     bool
+}
+
+// Message represents a single message in a conversation.
+type Message struct {
+	Role  Role
+	Parts []Part
+}
+
+// Role is the originator of a Message.
+type Role string
+
+const (
+	RoleUser      Role = "user"
+	RoleAssistant Role = "assistant"
+	RoleSystem    Role = "system"
+	RoleTool      Role = "tool" // For tool/function call results
+)
+
+// GenerateRequest is a request to generate content.
+// It can include a sequence of messages for context/history.
+type GenerateRequest struct {
+	Messages        []*Message
+	Model           string
+	MaxOutputTokens int
+	Temperature     *float64
+	TopP            *float64
+	TopK            int
+	StopSequences   []string
+	Tools           []*FunctionDefinition
+	// TODO: Add other parameters like response schema if needed
+}
+
+// GenerateResponse is the response from a content generation request.
+type GenerateResponse struct {
+	Candidates []*Candidate
+	Usage      UsageData
+	// Other metadata like safety ratings could be here.
+}
 
 // Candidate is one of a set of candidate response from the LLM.
 type Candidate interface {
@@ -158,11 +217,27 @@ type Candidate interface {
 // where the text response is "I need to do the necessary"
 // and then the function call is "do_necessary".
 type Part interface {
-	// AsText returns the text of the part.
-	// if the part is not text, it returns ("", false)
-	AsText() (string, bool)
+	// This is a marker interface. Implementations should also implement
+	// one or more of TextProducer, FunctionCallProducer, or FunctionCallResultProducer.
+}
 
-	// AsFunctionCalls returns the function calls of the part.
-	// if the part is not a function call, it returns (nil, false)
-	AsFunctionCalls() ([]FunctionCall, bool)
+// PartBase can be embedded in structs to satisfy the Part interface.
+type PartBase struct{}
+
+// TextProducer is an interface for Parts that can produce text.
+type TextProducer interface {
+	Part
+	Text() string
+}
+
+// FunctionCallProducer is an interface for Parts that represent a function call request.
+type FunctionCallProducer interface {
+	Part
+	FunctionCall() *FunctionCall
+}
+
+// FunctionCallResultProducer is an interface for Parts that represent a function call result.
+type FunctionCallResultProducer interface {
+	Part
+	FunctionCallResult() *FunctionCallResult
 }

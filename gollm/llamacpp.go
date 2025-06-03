@@ -35,7 +35,7 @@ func init() {
 
 // llamacppFactory is the provider factory function for llama.cpp.
 // Supports ClientOptions for custom configuration, including skipVerifySSL.
-func llamacppFactory(ctx context.Context, opts ClientOptions) (Client, error) {
+func llamacppFactory(ctx context.Context, opts Options) (Client, error) {
 	return NewLlamaCppClient(ctx, opts)
 }
 
@@ -56,7 +56,7 @@ var _ Client = &LlamaCppClient{}
 
 // NewLlamaCppClient creates a new client for llama.cpp.
 // Supports custom HTTP client and skipVerifySSL via ClientOptions.
-func NewLlamaCppClient(ctx context.Context, opts ClientOptions) (*LlamaCppClient, error) {
+func NewLlamaCppClient(ctx context.Context, opts Options) (*LlamaCppClient, error) {
 	host := os.Getenv("LLAMACPP_HOST")
 	if host == "" {
 		host = "http://127.0.0.1:8080/"
@@ -160,7 +160,7 @@ func (c *LlamaCppClient) SetResponseSchema(responseSchema *Schema) error {
 	return nil
 }
 
-func (c *LlamaCppClient) StartChat(systemPrompt, model string) Chat {
+func (c *LlamaCppClient) StartChat(systemPrompt string, model string) Chat {
 	return &LlamaCppChat{
 		client: c,
 		model:  model,
@@ -182,6 +182,10 @@ func (r *LlamaCppCompletionResponse) Response() string {
 }
 
 func (r *LlamaCppCompletionResponse) UsageMetadata() any {
+	// llama.cpp /completion endpoint might provide timings, map them if useful
+	if r.llamacppResponse != nil {
+		return r.llamacppResponse.Timings 
+	}
 	return nil
 }
 
@@ -299,7 +303,7 @@ func ptrTo[T any](t T) *T {
 
 type LlamaCppChatResponse struct {
 	candidates       []*LlamaCppCandidate
-	LlamaCppResponse llamacppChatResponse
+	LlamaCppResponse llamacppChatResponse // This is the raw response from the backend
 }
 
 var _ ChatResponse = &LlamaCppChatResponse{}
@@ -315,19 +319,22 @@ func (r *LlamaCppChatResponse) String() string {
 	return fmt.Sprintf("LlamaCppChatResponse{candidates=%v}", r.candidates)
 }
 
-// func (r *LlamaCppChatResponse) String() string {
-// 	var sb strings.Builder
-
-// 	fmt.Fprintf(&sb, "LlamaCppChatResponse{candidates=[")
-// 	for _, candidate := range r.candidates {
-// 		fmt.Fprintf(&sb, "%v", candidate)
-// 	}
-// 	fmt.Fprintf(&sb, "]}")
-// 	return sb.String()
-// }
-
-func (r *LlamaCppChatResponse) UsageMetadata() any {
-	return nil
+func (r *LlamaCppChatResponse) Usage() UsageData {
+	if r.LlamaCppResponse.Usage != nil {
+		return UsageData{
+			PromptTokens:     int(r.LlamaCppResponse.Usage.PromptTokens),
+			CompletionTokens: int(r.LlamaCppResponse.Usage.CompletionTokens),
+			TotalTokens:      int(r.LlamaCppResponse.Usage.TotalTokens),
+		}
+	}
+	if r.LlamaCppResponse.Timings != nil { // Fallback to timings if usage is not present
+		return UsageData{
+			PromptTokens:     int(r.LlamaCppResponse.Timings.PromptN),
+			CompletionTokens: int(r.LlamaCppResponse.Timings.PredictedN),
+			TotalTokens:      int(r.LlamaCppResponse.Timings.PromptN + r.LlamaCppResponse.Timings.PredictedN),
+		}
+	}
+	return UsageData{}
 }
 
 func (r *LlamaCppChatResponse) Candidates() []Candidate {
@@ -343,7 +350,10 @@ type LlamaCppCandidate struct {
 }
 
 func (r *LlamaCppCandidate) String() string {
-	return r.parts[0].text
+	if len(r.parts) > 0 && r.parts[0].text != "" {
+		return r.parts[0].text
+	}
+	return ""
 }
 
 func (r *LlamaCppCandidate) Parts() []Part {
@@ -355,23 +365,27 @@ func (r *LlamaCppCandidate) Parts() []Part {
 }
 
 type LlamaCppPart struct {
+	PartBase // Embed PartBase to satisfy gollm.Part
 	text          string
 	functionCalls []FunctionCall
 }
 
-func (p *LlamaCppPart) AsText() (string, bool) {
-	if len(p.text) > 0 {
-		return p.text, true
-	}
-	return "", false
+func (p *LlamaCppPart) Text() string {
+	return p.text
 }
 
-func (p *LlamaCppPart) AsFunctionCalls() ([]FunctionCall, bool) {
+func (p *LlamaCppPart) FunctionCall() *FunctionCall {
 	if len(p.functionCalls) > 0 {
-		return p.functionCalls, true
+		// Return the first function call. Llama.cpp might only return one.
+		return &p.functionCalls[0]
 	}
-	return nil, false
+	return nil
 }
+
+func (p *LlamaCppPart) FunctionCallResult() *FunctionCallResult {
+	return nil // LlamaCppPart does not represent a function call result from the LLM.
+}
+
 
 func (c *LlamaCppChat) SetFunctionDefinitions(functionDefinitions []*FunctionDefinition) error {
 	var tools []llamacppTool
@@ -488,7 +502,7 @@ type llamacppChatResponse struct {
 	Object            string           `json:"object,omitempty"`
 	Usage             *llamacppUsage   `json:"usage,omitempty"`
 	Id                string           `json:"id,omitempty"`
-	Timings           *llamacppTimings `json:"timings,omitempty"`
+	Timings           *llamacppTimings `json:"timings,omitempty"` // Added Timings to top-level response for Usage fallback
 }
 
 type llamacppChoice struct {

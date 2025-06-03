@@ -32,7 +32,7 @@ func init() {
 
 // ollamaFactory is the provider factory function for Ollama.
 // Supports ClientOptions for custom configuration, including skipVerifySSL.
-func ollamaFactory(ctx context.Context, opts ClientOptions) (Client, error) {
+func ollamaFactory(ctx context.Context, opts Options) (Client, error) {
 	return NewOllamaClient(ctx, opts)
 }
 
@@ -55,7 +55,7 @@ var _ Client = &OllamaClient{}
 
 // NewOllamaClient creates a new client for Ollama.
 // Supports custom HTTP client and skipVerifySSL via ClientOptions if the SDK supports it.
-func NewOllamaClient(ctx context.Context, opts ClientOptions) (*OllamaClient, error) {
+func NewOllamaClient(ctx context.Context, opts Options) (*OllamaClient, error) {
 	// Create custom HTTP client with SSL verification option from client options
 	httpClient := createCustomHTTPClient(opts.SkipVerifySSL)
 	client := api.NewClient(envconfig.Host(), httpClient)
@@ -79,7 +79,7 @@ func (c *OllamaClient) GenerateCompletion(ctx context.Context, request *Completi
 	var ollamaResponse *OllamaCompletionResponse
 
 	respFunc := func(resp api.GenerateResponse) error {
-		ollamaResponse = &OllamaCompletionResponse{response: resp.Response}
+		ollamaResponse = &OllamaCompletionResponse{response: resp.Response, usage: resp} // Store usage
 		return nil
 	}
 
@@ -109,7 +109,7 @@ func (c *OllamaClient) SetResponseSchema(schema *Schema) error {
 	return nil
 }
 
-func (c *OllamaClient) StartChat(systemPrompt, model string) Chat {
+func (c *OllamaClient) StartChat(systemPrompt string, model string) Chat {
 	return &OllamaChat{
 		client: c.client,
 		model:  model,
@@ -124,6 +124,7 @@ func (c *OllamaClient) StartChat(systemPrompt, model string) Chat {
 
 type OllamaCompletionResponse struct {
 	response string
+	usage    api.GenerateResponse // To store usage data from Generate call
 }
 
 func (r *OllamaCompletionResponse) Response() string {
@@ -131,7 +132,7 @@ func (r *OllamaCompletionResponse) Response() string {
 }
 
 func (r *OllamaCompletionResponse) UsageMetadata() any {
-	return nil
+	return r.usage // Return the whole GenerateResponse as it contains usage-like fields
 }
 
 func (c *OllamaChat) Send(ctx context.Context, contents ...any) (ChatResponse, error) {
@@ -145,10 +146,24 @@ func (c *OllamaChat) Send(ctx context.Context, contents ...any) (ChatResponse, e
 			}
 			c.history = append(c.history, message)
 		case FunctionCallResult:
-			message := api.Message{
-				Role:    "user",
-				Content: fmt.Sprintf("Function call result: %s", v.Result),
+			// Ollama's API expects tool_calls and their results to be passed back as role: "tool"
+			// The content should be the result of the tool call.
+			// The ToolCallID should match the ID of the tool_call from the assistant.
+			// This simple conversion might need adjustment based on how Ollama expects tool results.
+			resultJSON, err := json.Marshal(v.Result)
+			if err != nil {
+				klog.Errorf("Failed to marshal function call result for %s: %v", v.Name, err)
+				// Decide how to handle this error, e.g., send an error message as content
+				resultJSON = []byte(fmt.Sprintf(`{"error": "failed to marshal result for tool %s"}`, v.Name))
 			}
+			message := api.Message{
+				Role:    "tool",
+				Content: string(resultJSON),
+				// TODO: Ollama's api.Message doesn't have a direct ToolCallID field.
+				// Tool results are typically correlated by order or by including the call info in content.
+				// For now, we are just sending the result.
+			}
+			log.V(2).Infof("Adding tool call result to history for tool %s: %s", v.Name, string(resultJSON))
 			c.history = append(c.history, message)
 		default:
 			return nil, fmt.Errorf("unsupported content type: %T", v)
@@ -158,8 +173,7 @@ func (c *OllamaChat) Send(ctx context.Context, contents ...any) (ChatResponse, e
 	req := &api.ChatRequest{
 		Model:    c.model,
 		Messages: c.history,
-		// set streaming to false
-		Stream: new(bool),
+		Stream: new(bool), // Explicitly false for non-streaming
 		Tools:  c.tools,
 	}
 
@@ -169,16 +183,6 @@ func (c *OllamaChat) Send(ctx context.Context, contents ...any) (ChatResponse, e
 		log.Info("received response from ollama", "resp", resp)
 		ollamaResponse = &OllamaChatResponse{
 			ollamaResponse: resp,
-			candidates: []*OllamaCandidate{
-				{
-					parts: []OllamaPart{
-						{
-							text:      resp.Message.Content,
-							toolCalls: resp.Message.ToolCalls,
-						},
-					},
-				},
-			},
 		}
 		c.history = append(c.history, resp.Message)
 		return nil
@@ -208,7 +212,6 @@ func (c *OllamaChat) SendStreaming(ctx context.Context, contents ...any) (ChatRe
 }
 
 type OllamaChatResponse struct {
-	candidates     []*OllamaCandidate
 	ollamaResponse api.ChatResponse
 }
 
@@ -222,65 +225,97 @@ func (r *OllamaChatResponse) MarshalJSON() ([]byte, error) {
 }
 
 func (r *OllamaChatResponse) String() string {
-	return fmt.Sprintf("OllamaChatResponse{candidates=%v}", r.candidates)
+	if r.ollamaResponse.Message.Content != "" {
+		return r.ollamaResponse.Message.Content
+	}
+	if len(r.ollamaResponse.Message.ToolCalls) > 0 {
+		return fmt.Sprintf("[tool_calls: %d]", len(r.ollamaResponse.Message.ToolCalls))
+	}
+	return ""
 }
 
-func (r *OllamaChatResponse) UsageMetadata() any {
-	return nil
+func (r *OllamaChatResponse) Usage() UsageData {
+	return UsageData{
+		PromptTokens:     r.ollamaResponse.PromptEvalCount,
+		CompletionTokens: r.ollamaResponse.EvalCount, // EvalCount is for the response tokens
+		TotalTokens:      r.ollamaResponse.PromptEvalCount + r.ollamaResponse.EvalCount,
+	}
 }
 
 func (r *OllamaChatResponse) Candidates() []Candidate {
-	var cads []Candidate
-	for _, candidate := range r.candidates {
-		cads = append(cads, candidate)
-	}
-	return cads
+	return []Candidate{&OllamaCandidate{response: r.ollamaResponse}}
 }
 
 type OllamaCandidate struct {
-	parts []OllamaPart
+	response api.ChatResponse
 }
 
+var _ Candidate = &OllamaCandidate{}
+
+
 func (r *OllamaCandidate) String() string {
-	return r.parts[0].text
+	if r.response.Message.Content != "" {
+		return r.response.Message.Content
+	}
+	if len(r.response.Message.ToolCalls) > 0 {
+		return fmt.Sprintf("[tool_calls: %d]", len(r.response.Message.ToolCalls))
+	}
+	return ""
 }
+
+func (r *OllamaCandidate) FinishReason() string {
+	// Ollama API's ChatResponse has a "Done" bool, but not a specific string reason like others.
+	// We can infer "stop" if Done is true and no error.
+	if r.response.Done {
+		return "stop" 
+	}
+	return "" 
+}
+
 
 func (r *OllamaCandidate) Parts() []Part {
 	var parts []Part
-	for _, part := range r.parts {
-		parts = append(parts, &OllamaPart{
-			text:      part.text,
-			toolCalls: part.toolCalls,
-		})
+	if r.response.Message.Content != "" {
+		parts = append(parts, &OllamaPart{PartBase{}, r.response.Message.Content, nil})
+	}
+	if len(r.response.Message.ToolCalls) > 0 {
+		parts = append(parts, &OllamaPart{PartBase{}, "", r.response.Message.ToolCalls})
 	}
 	return parts
 }
 
 type OllamaPart struct {
+	PartBase
 	text      string
 	toolCalls []api.ToolCall
 }
 
-func (p *OllamaPart) AsText() (string, bool) {
-	if len(p.text) > 0 {
-		return p.text, true
-	}
-	return "", false
+var _ Part = (*OllamaPart)(nil)
+
+
+func (p *OllamaPart) Text() string {
+	return p.text
 }
 
-func (p *OllamaPart) AsFunctionCalls() ([]FunctionCall, bool) {
+func (p *OllamaPart) FunctionCall() *FunctionCall {
 	if len(p.toolCalls) > 0 {
-		var functionCalls []FunctionCall
-		for _, toolCall := range p.toolCalls {
-			functionCalls = append(functionCalls, FunctionCall{
-				Name:      toolCall.Function.Name,
-				Arguments: toolCall.Function.Arguments,
-			})
+		// Assuming one function call per part for simplicity,
+		// or that gollm.FunctionCall should be a slice if multiple are expected in one Part.
+		// For now, taking the first one.
+		tc := p.toolCalls[0]
+		return &FunctionCall{
+			Name:      tc.Function.Name,
+			Arguments: tc.Function.Arguments,
+			// Ollama ToolCall doesn't have an explicit ID.
 		}
-		return functionCalls, true
 	}
-	return nil, false
+	return nil
 }
+
+func (p *OllamaPart) FunctionCallResult() *FunctionCallResult {
+	return nil // OllamaPart represents assistant's output, not user-provided results.
+}
+
 
 func (c *OllamaChat) SetFunctionDefinitions(functionDefinitions []*FunctionDefinition) error {
 	var tools []api.Tool
@@ -317,16 +352,21 @@ func fnDefToOllamaTool(fnDef *FunctionDefinition) api.Tool {
 		},
 	}
 
-	for paramName, param := range fnDef.Parameters.Properties {
-		tool.Function.Parameters.Properties[paramName] = struct {
-			Type        string   `json:"type"`
-			Description string   `json:"description"`
-			Enum        []string `json:"enum,omitempty"`
-		}{
-			Type:        string(param.Type),
-			Description: param.Description,
+	if fnDef.Parameters != nil && fnDef.Parameters.Properties != nil {
+		for paramName, param := range fnDef.Parameters.Properties {
+			tool.Function.Parameters.Properties[paramName] = struct {
+				Type        string   `json:"type"`
+				Description string   `json:"description"`
+				Enum        []string `json:"enum,omitempty"`
+			}{
+				Type:        string(param.Type),
+				Description: param.Description,
+				// Note: Ollama's direct parameter struct doesn't have Enum.
+				// This might need to be part of the description or handled differently if strict schema adherence is needed.
+			}
 		}
 	}
+
 
 	return tool
 }

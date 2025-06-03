@@ -489,12 +489,16 @@ type openAIChatResponse struct {
 
 var _ ChatResponse = (*openAIChatResponse)(nil)
 
-func (r *openAIChatResponse) UsageMetadata() any {
+func (r *openAIChatResponse) Usage() UsageData {
 	// Check if the main completion object and Usage exist
-	if r.openaiCompletion != nil && r.openaiCompletion.Usage.TotalTokens > 0 { // Check a field within Usage
-		return r.openaiCompletion.Usage
+	if r.openaiCompletion != nil && r.openaiCompletion.Usage != nil {
+		return UsageData{
+			PromptTokens:     r.openaiCompletion.Usage.PromptTokens,
+			CompletionTokens: r.openaiCompletion.Usage.CompletionTokens,
+			TotalTokens:      r.openaiCompletion.Usage.TotalTokens,
+		}
 	}
-	return nil
+	return UsageData{}
 }
 
 func (r *openAIChatResponse) Candidates() []Candidate {
@@ -635,12 +639,16 @@ func (c *openAIStreamCandidate) Parts() []Part {
 	return parts
 }
 
-// Add UsageMetadata implementation
-func (r *openAIChatStreamResponse) UsageMetadata() any {
+// Add Usage implementation
+func (r *openAIChatStreamResponse) Usage() UsageData {
 	if r.accumulator.Usage.TotalTokens > 0 {
-		return r.accumulator.Usage
+		return UsageData{
+			PromptTokens:     r.accumulator.Usage.PromptTokens,
+			CompletionTokens: r.accumulator.Usage.CompletionTokens,
+			TotalTokens:      r.accumulator.Usage.TotalTokens,
+		}
 	}
-	return nil
+	return UsageData{}
 }
 
 // Add String implementation

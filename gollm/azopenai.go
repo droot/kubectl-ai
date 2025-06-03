@@ -42,7 +42,7 @@ func init() {
 azureOpenAIFactory is the provider factory function for Azure OpenAI.
 Supports ClientOptions for custom configuration.
 */
-func azureOpenAIFactory(ctx context.Context, opts ClientOptions) (Client, error) {
+func azureOpenAIFactory(ctx context.Context, opts Options) (Client, error) {
 	return NewAzureOpenAIClient(ctx, opts)
 }
 
@@ -55,7 +55,7 @@ var _ Client = &AzureOpenAIClient{}
 
 // NewAzureOpenAIClient creates a new Azure OpenAI client.
 // Supports ClientOptions and SkipVerifySSL for custom HTTP transport.
-func NewAzureOpenAIClient(ctx context.Context, opts ClientOptions) (*AzureOpenAIClient, error) {
+func NewAzureOpenAIClient(ctx context.Context, opts Options) (*AzureOpenAIClient, error) {
 	azureOpenAIEndpoint := os.Getenv("AZURE_OPENAI_ENDPOINT")
 	if opts.URL != nil && opts.URL.Host != "" {
 		opts.URL.Scheme = "https"
@@ -294,8 +294,15 @@ func (r *AzureOpenAIChatResponse) String() string {
 	return fmt.Sprintf("AzureOpenAIChatResponse{candidates=%v}", r.azureOpenAIResponse.Choices)
 }
 
-func (r *AzureOpenAIChatResponse) UsageMetadata() any {
-	return r.azureOpenAIResponse.Usage
+func (r *AzureOpenAIChatResponse) Usage() UsageData {
+	if r.azureOpenAIResponse.Usage == nil {
+		return UsageData{}
+	}
+	return UsageData{
+		PromptTokens:     int(*r.azureOpenAIResponse.Usage.PromptTokens),
+		CompletionTokens: int(*r.azureOpenAIResponse.Usage.CompletionTokens), // Azure uses CompletionTokens
+		TotalTokens:      int(*r.azureOpenAIResponse.Usage.TotalTokens),
+	}
 }
 
 func (r *AzureOpenAIChatResponse) Candidates() []Candidate {
@@ -317,73 +324,74 @@ func (r *AzureOpenAICandidate) String() string {
 		if i > 0 {
 			response.WriteString(", ")
 		}
-		text, ok := parts.AsText()
-		if ok {
-			response.WriteString(text)
-		}
-		functionCalls, ok := parts.AsFunctionCalls()
-		if ok {
-			response.WriteString("functionCalls=[")
-			for _, functionCall := range functionCalls {
-				response.WriteString(fmt.Sprintf("%q(args=%v)", functionCall.Name, functionCall.Arguments))
-			}
-			response.WriteString("]}")
+		if tp, ok := parts.(TextProducer); ok {
+			response.WriteString(tp.Text())
+		} else if fp, ok := parts.(FunctionCallProducer); ok && fp.FunctionCall() != nil {
+			functionCall := fp.FunctionCall()
+			response.WriteString(fmt.Sprintf("functionCall={Name:%q Args:%v}", functionCall.Name, functionCall.Arguments))
 		}
 	}
-	response.WriteString("]}")
+	response.WriteString("]")
 	return response.String()
 }
 
 func (r *AzureOpenAICandidate) Parts() []Part {
 	var parts []Part
 
-	if r.candidate.Message != nil {
+	if r.candidate.Message != nil && r.candidate.Message.Content != nil {
 		parts = append(parts, &AzureOpenAIPart{
 			text: r.candidate.Message.Content,
 		})
 	}
 
+	// Assuming ToolCalls are ChatCompletionsFunctionToolCall, might need to check type if others are possible
 	for _, tool := range r.candidate.Message.ToolCalls {
-		if tool == nil {
-			continue
+		if toolCall, ok := tool.(*azopenai.ChatCompletionsFunctionToolCall); ok && toolCall != nil {
+			parts = append(parts, &AzureOpenAIPart{
+				functionCall: &toolCall.Function,
+			})
 		}
-		parts = append(parts, &AzureOpenAIPart{
-			functionCall: tool.(*azopenai.ChatCompletionsFunctionToolCall).Function,
-		})
 	}
-
 	return parts
 }
 
 type AzureOpenAIPart struct {
+	PartBase // Embed PartBase to satisfy gollm.Part
 	text         *string
 	functionCall *azopenai.FunctionCall
 }
 
-func (p *AzureOpenAIPart) AsText() (string, bool) {
-	if p.text != nil && len(*p.text) > 0 {
-		return *p.text, true
+func (p *AzureOpenAIPart) Text() string {
+	if p.text != nil {
+		return *p.text
 	}
-	return "", false
+	return ""
 }
 
-func (p *AzureOpenAIPart) AsFunctionCalls() ([]FunctionCall, bool) {
+func (p *AzureOpenAIPart) FunctionCall() *FunctionCall {
 	if p.functionCall != nil {
 		argumentsObj := map[string]any{}
-		err := json.Unmarshal([]byte(*p.functionCall.Arguments), &argumentsObj)
-		if err != nil {
-			return nil, false
+		// Arguments in azopenai.FunctionCall is *string, which is JSON.
+		if p.functionCall.Arguments != nil {
+			err := json.Unmarshal([]byte(*p.functionCall.Arguments), &argumentsObj)
+			if err != nil {
+				// Log or handle error: could return a FunctionCall with an error message in Arguments
+				log.Printf("Error unmarshalling function call arguments: %v. Raw args: %s", err, *p.functionCall.Arguments)
+				return &FunctionCall{
+					Name:      *p.functionCall.Name,
+					Arguments: map[string]any{"error": "failed to unmarshal arguments", "raw": *p.functionCall.Arguments},
+				}
+			}
 		}
-		functionCalls := []FunctionCall{
-			{
-				Name:      *p.functionCall.Name,
-				Arguments: argumentsObj,
-			},
+		return &FunctionCall{
+			Name:      *p.functionCall.Name,
+			Arguments: argumentsObj,
 		}
-		return functionCalls, true
 	}
-	return nil, false
+	return nil
 }
+func (p *AzureOpenAIPart) FunctionCallResult() *FunctionCallResult { return nil }
+
 
 func (c *AzureOpenAIChat) SetFunctionDefinitions(functionDefinitions []*FunctionDefinition) error {
 	var tools []azopenai.ChatCompletionsToolDefinitionClassification
@@ -394,27 +402,35 @@ func (c *AzureOpenAIChat) SetFunctionDefinitions(functionDefinitions []*Function
 	return nil
 }
 
-func fnDefToAzureOpenAITool(fnDef *FunctionDefinition) *azopenai.ChatCompletionsFunctionToolDefinitionFunction {
-	properties := make(map[string]any)
+func fnDefToAzureOpenAITool(fnDef *FunctionDefinition) *azopenai.FunctionDefinition {
+	properties := make(map[string]*azopenai.FunctionParameterPropertyDefinition)
 	for paramName, param := range fnDef.Parameters.Properties {
-		properties[paramName] = map[string]any{
-			"type":        string(param.Type),
-			"description": param.Description,
+		properties[paramName] = &azopenai.FunctionParameterPropertyDefinition{
+			Type:        azopenai.NewJSONSchemaType(string(param.Type)), // Assuming SchemaType is compatible
+			Description: &param.Description,
 		}
 	}
-	parameters := map[string]any{
-		"type":       "object",
-		"properties": properties,
+	parameters := azopenai.FunctionParameters{ // Changed to concrete type
+		Type:       azopenai.NewJSONSchemaType(string(fnDef.Parameters.Type)), // Assuming TypeObject means "object"
+		Properties: properties,
 	}
 	if len(fnDef.Parameters.Required) > 0 {
-		parameters["required"] = fnDef.Parameters.Required
+		parameters.Required = fnDef.Parameters.Required
 	}
-	jsonBytes, _ := json.Marshal(parameters)
+	
+	// azopenai.FunctionDefinition requires parameters to be marshaled JSON
+	paramBytes, err := json.Marshal(parameters)
+	if err != nil {
+		// Log or handle error appropriately
+		log.Printf("Error marshalling function parameters for %s: %v", fnDef.Name, err)
+		return nil // Or return an error
+	}
 
-	tool := azopenai.ChatCompletionsFunctionToolDefinitionFunction{
+
+	tool := azopenai.FunctionDefinition{ // Changed to concrete type
 		Name:        &fnDef.Name,
 		Description: &fnDef.Description,
-		Parameters:  jsonBytes,
+		Parameters:  paramBytes, // Parameters should be []byte (raw JSON)
 	}
 
 	return &tool
