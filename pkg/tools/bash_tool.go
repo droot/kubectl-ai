@@ -281,6 +281,8 @@ func executeCommand(cmd *exec.Cmd) (*ExecResult, error) {
 	if err := cmd.Run(); err != nil {
 		if exitError, ok := err.(*exec.ExitError); ok {
 			results.ExitCode = exitError.ExitCode()
+			results.Error = exitError.Error()
+			results.Stderr = string(exitError.Stderr)
 		} else {
 			return nil, err
 		}

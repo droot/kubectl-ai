@@ -180,6 +180,7 @@ func (a *Conversation) RunOneRound(ctx context.Context, query string) error {
 
 		for response, err := range stream {
 			if err != nil {
+				log.Error(err, "error reading streaming LLM response")
 				return fmt.Errorf("reading streaming LLM response: %w", err)
 			}
 			if response == nil {
@@ -330,6 +331,7 @@ func (a *Conversation) RunOneRound(ctx context.Context, query string) error {
 				WorkDir:    a.workDir,
 			})
 			if err != nil {
+				log.Error(err, "error executing action", "output", output)
 				return fmt.Errorf("executing action: %w", err)
 			}
 
@@ -347,6 +349,7 @@ func (a *Conversation) RunOneRound(ctx context.Context, query string) error {
 				// If shim is disabled, convert the result to a map and append FunctionCallResult
 				result, err := tools.ToolResultToMap(output)
 				if err != nil {
+					log.Error(err, "error converting tool result to map", "output", output)
 					return err
 				}
 
