@@ -441,18 +441,20 @@ func (c *GeminiChat) SendStreaming(ctx context.Context, contents ...any) (ChatRe
 			if !ok {
 				return
 			}
-
-			var response *GeminiChatResponse
-			if geminiResponse != nil {
-				response = &GeminiChatResponse{geminiResponse: geminiResponse}
-
-				if len(geminiResponse.Candidates) > 0 {
-					// TODO: Should we try to coalesce parts when we have a streaming response?
-					c.history = append(c.history, geminiResponse.Candidates[0].Content)
-				}
+			if geminiResponse == nil || len(geminiResponse.Candidates) == 0 {
+				return
 			}
 
-			if !yield(response, err) {
+			content := geminiResponse.Candidates[0].Content
+			if content == nil || content.Parts == nil || len(content.Parts) == 0 {
+				// This happens when there is empty content with the finish reason (STOP) to indicate that streaming response is finished.
+				// xref: https://github.com/GoogleCloudPlatform/kubectl-ai/issues/306
+				log.V(1).Info("empty response probably with STOP finishedReason")
+				return
+			}
+			c.history = append(c.history, content)
+			// yield only when we have a non-empty response
+			if !yield(&GeminiChatResponse{geminiResponse: geminiResponse}, err) {
 				return
 			}
 		}
