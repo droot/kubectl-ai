@@ -19,7 +19,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"html/template"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,7 +27,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/kubectl-ai/gollm"
-	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/ui"
 	"k8s.io/klog/v2"
 )
 
@@ -142,12 +140,6 @@ type ExecResult struct {
 
 func (e *ExecResult) String() string {
 	return fmt.Sprintf("Command: %q\nError: %q\nStdout: %q\nStderr: %q\nExitCode: %d\nStreamType: %q}", e.Command, e.Error, e.Stdout, e.Stderr, e.ExitCode, e.StreamType)
-}
-
-var _ ui.CanFormatAsHTML = &ExecResult{}
-
-func (e *ExecResult) FormatAsHTML() template.HTML {
-	return template.HTML("<pre><code>" + template.HTMLEscapeString(e.Stdout) + "</code></pre>")
 }
 
 func IsInteractiveCommand(command string) (bool, error) {
