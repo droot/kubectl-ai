@@ -16,44 +16,14 @@ package ui
 
 import (
 	"context"
-	"html/template"
 )
 
+// UI is the interface that defines the capabilities of assisant's user interface.
+// Each of the UIs, CLI, TUI, Web, etc. implement this interface.
 type UI interface {
 	// ClearScreen clears any output rendered to the screen
 	ClearScreen()
 
 	// Run starts the UI and blocks until the context is done.
 	Run(ctx context.Context) error
-}
-
-type ComputedStyle struct {
-	Foreground     ColorValue
-	RenderMarkdown bool
-}
-
-type ColorValue string
-
-const (
-	ColorGreen ColorValue = "green"
-	ColorWhite            = "white"
-	ColorRed              = "red"
-)
-
-type StyleOption func(s *ComputedStyle)
-
-func Foreground(color ColorValue) StyleOption {
-	return func(s *ComputedStyle) {
-		s.Foreground = color
-	}
-}
-
-func RenderMarkdown() StyleOption {
-	return func(s *ComputedStyle) {
-		s.RenderMarkdown = true
-	}
-}
-
-type CanFormatAsHTML interface {
-	FormatAsHTML() template.HTML
 }

@@ -34,6 +34,34 @@ import (
 	"k8s.io/klog/v2"
 )
 
+type computedStyle struct {
+	Foreground     colorValue
+	RenderMarkdown bool
+}
+
+type colorValue string
+
+const (
+	colorGreen colorValue = "green"
+	colorWhite colorValue = "white"
+	colorRed   colorValue = "red"
+)
+
+type styleOption func(s *computedStyle)
+
+func foreground(color colorValue) styleOption {
+	return func(s *computedStyle) {
+		s.Foreground = color
+	}
+}
+
+func renderMarkdown() styleOption {
+	return func(s *computedStyle) {
+		s.RenderMarkdown = true
+	}
+}
+
+// TODO: rename this to CLI because the command line interface.
 type TerminalUI struct {
 	journal          journal.Recorder
 	markdownRenderer *glamour.TermRenderer
@@ -201,7 +229,7 @@ func (u *TerminalUI) Close() error {
 
 func (u *TerminalUI) handleMessage(msg *api.Message) {
 	text := ""
-	var styleOptions []StyleOption
+	var styleOptions []styleOption
 
 	switch msg.Type {
 	case api.MessageTypeText:
@@ -212,15 +240,15 @@ func (u *TerminalUI) handleMessage(msg *api.Message) {
 			// since we print the message as user types, we don't need to print it again
 			return
 		case api.MessageSourceAgent:
-			styleOptions = append(styleOptions, RenderMarkdown(), Foreground(ColorGreen))
+			styleOptions = append(styleOptions, renderMarkdown(), foreground(colorGreen))
 		case api.MessageSourceModel:
-			styleOptions = append(styleOptions, RenderMarkdown())
+			styleOptions = append(styleOptions, renderMarkdown())
 		}
 	case api.MessageTypeError:
-		styleOptions = append(styleOptions, Foreground(ColorRed))
+		styleOptions = append(styleOptions, foreground(colorRed))
 		text = msg.Payload.(string)
 	case api.MessageTypeToolCallRequest:
-		styleOptions = append(styleOptions, Foreground(ColorGreen))
+		styleOptions = append(styleOptions, foreground(colorGreen))
 		text = fmt.Sprintf("  Running: %s\n", msg.Payload.(string))
 	case api.MessageTypeToolCallResponse:
 		// TODO: we should print the tool call result here
@@ -354,7 +382,7 @@ func (u *TerminalUI) handleMessage(msg *api.Message) {
 		return
 	}
 
-	computedStyle := &ComputedStyle{}
+	computedStyle := &computedStyle{}
 	for _, opt := range styleOptions {
 		opt(computedStyle)
 	}
@@ -371,13 +399,13 @@ func (u *TerminalUI) handleMessage(msg *api.Message) {
 	}
 	reset := ""
 	switch computedStyle.Foreground {
-	case ColorRed:
+	case colorRed:
 		fmt.Printf("\033[31m")
 		reset += "\033[0m"
-	case ColorGreen:
+	case colorGreen:
 		fmt.Printf("\033[32m")
 		reset += "\033[0m"
-	case ColorWhite:
+	case colorWhite:
 		fmt.Printf("\033[37m")
 		reset += "\033[0m"
 

@@ -1,0 +1,709 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>kubectl-ai</title>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.5/dist/purify.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        'sans': ['Inter', 'system-ui', 'sans-serif'],
+                        'mono': ['JetBrains Mono', 'Menlo', 'Monaco', 'Courier New', 'monospace'],
+                    },
+                    colors: {
+                        'brand': {
+                            50: '#f0f9ff',
+                            100: '#e0f2fe',
+                            500: '#0ea5e9',
+                            600: '#0284c7',
+                            700: '#0369a1',
+                            800: '#075985',
+                            900: '#0c4a6e',
+                        }
+                    },
+                    animation: {
+                        'fade-in': 'fadeIn 0.5s ease-in-out',
+                        'slide-up': 'slideUp 0.3s ease-out',
+                        'pulse-soft': 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+                    },
+                    keyframes: {
+                        fadeIn: {
+                            '0%': { opacity: '0' },
+                            '100%': { opacity: '1' },
+                        },
+                        slideUp: {
+                            '0%': { transform: 'translateY(10px)', opacity: '0' },
+                            '100%': { transform: 'translateY(0)', opacity: '1' },
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        /* Custom scrollbar */
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 6px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: #f1f5f9;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 3px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8;
+        }
+
+        /* Markdown content styles */
+        .prose {
+            max-width: none;
+        }
+        .prose p {
+            margin-bottom: 1em;
+            line-height: 1.7;
+        }
+        .prose h1, .prose h2, .prose h3, .prose h4, .prose h5, .prose h6 {
+            margin-top: 1.5em;
+            margin-bottom: 0.5em;
+            font-weight: 600;
+            line-height: 1.25;
+        }
+        .prose h1 { font-size: 1.5em; }
+        .prose h2 { font-size: 1.3em; }
+        .prose h3 { font-size: 1.1em; }
+        .prose code {
+            background: #f1f5f9;
+            color: #475569;
+            padding: 0.125rem 0.375rem;
+            border-radius: 0.375rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.875em;
+            font-weight: 500;
+        }
+        .prose pre {
+            background: #0f172a;
+            color: #e2e8f0;
+            padding: 1.25rem;
+            border-radius: 0.75rem;
+            overflow-x: auto;
+            margin: 1.5em 0;
+            border: 1px solid #1e293b;
+        }
+        .prose pre code {
+            background: transparent;
+            color: inherit;
+            padding: 0;
+            border-radius: 0;
+        }
+        .prose ul, .prose ol {
+            margin: 1em 0;
+            padding-left: 1.5em;
+        }
+        .prose li {
+            margin-bottom: 0.5em;
+        }
+        .prose blockquote {
+            border-left: 4px solid #e2e8f0;
+            padding-left: 1rem;
+            margin: 1.5em 0;
+            color: #64748b;
+            font-style: italic;
+        }
+        .prose a {
+            color: #0ea5e9;
+            text-decoration: underline;
+            text-decoration-color: #bae6fd;
+            text-underline-offset: 2px;
+        }
+        .prose a:hover {
+            color: #0284c7;
+            text-decoration-color: #0ea5e9;
+        }
+        .prose table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 1.5em 0;
+            border-radius: 0.5rem;
+            overflow: hidden;
+            border: 1px solid #e2e8f0;
+        }
+        .prose th, .prose td {
+            border: 1px solid #e2e8f0;
+            padding: 0.75rem;
+            text-align: left;
+        }
+        .prose th {
+            background: #f8fafc;
+            font-weight: 600;
+            color: #374151;
+        }
+
+        /* Message animations */
+        .message-enter {
+            animation: slide-up 0.3s ease-out;
+        }
+
+        /* Choice button hover effects */
+        .choice-button {
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .choice-button:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+        }
+
+        /* Status indicator pulse */
+        .status-pulse {
+            animation: pulse-soft 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+
+        /* Typing indicator animation */
+        .typing-indicator {
+            display: flex;
+            align-items: center;
+            space-x: 1px;
+        }
+        
+        .typing-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: #94a3b8;
+            animation: typing 1.4s infinite ease-in-out;
+        }
+        
+        .typing-dot:nth-child(1) {
+            animation-delay: 0ms;
+        }
+        
+        .typing-dot:nth-child(2) {
+            animation-delay: 200ms;
+        }
+        
+        .typing-dot:nth-child(3) {
+            animation-delay: 400ms;
+        }
+        
+        @keyframes typing {
+            0%, 60%, 100% {
+                transform: translateY(0);
+                opacity: 0.4;
+            }
+            30% {
+                transform: translateY(-10px);
+                opacity: 1;
+            }
+        }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-slate-50 to-blue-50 font-sans">
+    <div id="root"></div>
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        function App() {
+            const [messages, setMessages] = useState([]);
+            const [input, setInput] = useState('');
+            const [agentState, setAgentState] = useState('idle');
+            const [isConnected, setIsConnected] = useState(false);
+            const [expandedOutputs, setExpandedOutputs] = useState(new Set());
+            const messagesEndRef = useRef(null);
+            const inputRef = useRef(null);
+
+            const toggleOutput = (messageIndex) => {
+                const newExpanded = new Set(expandedOutputs);
+                if (newExpanded.has(messageIndex)) {
+                    newExpanded.delete(messageIndex);
+                } else {
+                    newExpanded.add(messageIndex);
+                }
+                setExpandedOutputs(newExpanded);
+            };
+
+            const scrollToBottom = () => {
+                messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+            };
+
+            useEffect(() => {
+                scrollToBottom();
+            }, [messages]);
+
+            useEffect(() => {
+                const eventSource = new EventSource('/messages-stream');
+                
+                eventSource.onopen = () => {
+                    setIsConnected(true);
+                    console.log('Connected to kubectl-ai');
+                };
+
+                eventSource.onmessage = (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+                        setMessages(data.messages || []);
+                        setAgentState(data.agentState || 'idle');
+                    } catch (error) {
+                        console.error('Error parsing server data:', error);
+                    }
+                };
+
+                eventSource.onerror = () => {
+                    setIsConnected(false);
+                    eventSource.close();
+                };
+
+                return () => {
+                    eventSource.close();
+                };
+            }, []);
+
+            useEffect(() => {
+                const canSendMessage = agentState === 'idle' || agentState === 'done' || agentState === 'waiting-for-input';
+                const isWaitingForChoice = agentState === 'waiting-for-input' && messages.length > 0 &&
+                    messages[messages.length - 1].Type === 'user-choice-request';
+
+                if (canSendMessage && !isWaitingForChoice && inputRef.current) {
+                    inputRef.current.focus();
+                }
+            }, [agentState, messages]);
+
+            const sendMessage = async (message) => {
+                if (!message.trim()) return;
+
+                try {
+                    const response = await fetch('/send-message', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: 'q=' + encodeURIComponent(message)
+                    });
+
+                    if (response.ok) {
+                        setInput('');
+                    }
+                } catch (error) {
+                    console.error('Error sending message:', error);
+                }
+            };
+
+            const chooseOption = async (optionIndex) => {
+                try {
+                    await fetch('/choose-option', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: 'choice=' + encodeURIComponent(optionIndex)
+                    });
+                } catch (error) {
+                    console.error('Error choosing option:', error);
+                }
+            };
+
+            const handleSubmit = (e) => {
+                e.preventDefault();
+                if (isWaitingForChoice) {
+                    const lowercaseInput = input.toLowerCase().trim();
+                    if (lowercaseInput === 'y' || lowercaseInput === 'yes') {
+                        chooseOption(1);
+                    } else if (lowercaseInput === 'n' || lowercaseInput === 'no') {
+                        chooseOption(3);
+                    } else {
+                        const num = parseInt(lowercaseInput, 10);
+                        if (!isNaN(num) && num > 0 && num <= messages[messages.length - 1].Payload.Options.length) {
+                            chooseOption(num);
+                        }
+                    }
+                    setInput('');
+                } else {
+                    sendMessage(input);
+                }
+            };
+
+            const formatMessage = (message) => {
+                if (!message) return '';
+                
+                try {
+                    marked.setOptions({
+                        breaks: true,
+                        gfm: true,
+                        tables: true,
+                        sanitize: false
+                    });
+                    
+                    const rawHtml = marked.parse(message);
+                    const cleanHtml = DOMPurify.sanitize(rawHtml, {
+                        ALLOWED_TAGS: ['p', 'br', 'strong', 'em', 'code', 'pre', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'blockquote', 'a', 'img', 'table', 'thead', 'tbody', 'tr', 'th', 'td'],
+                        ALLOWED_ATTR: ['href', 'src', 'alt', 'title', 'class']
+                    });
+                    
+                    return cleanHtml;
+                } catch (error) {
+                    console.error('Error formatting message:', error);
+                    return message.replace(/\n/g, '<br>');
+                }
+            };
+
+            const renderMessage = (message, index) => {
+                const getSourceInfo = (source) => {
+                    switch (source) {
+                        case 'user': return { name: 'You', color: 'text-brand-700', bg: 'bg-brand-50', avatar: '👤' };
+                        case 'model': return { name: 'AI Assistant', color: 'text-emerald-700', bg: 'bg-emerald-50', avatar: '🤖' };
+                        case 'agent': return { name: 'AI Assistant', color: 'text-emerald-700', bg: 'bg-emerald-50', avatar: '🤖' };
+                        default: return { name: 'System', color: 'text-gray-700', bg: 'bg-gray-50', avatar: '⚙️' };
+                    }
+                };
+
+                const sourceInfo = getSourceInfo(message.Source);
+
+                // Helper function to find the corresponding tool response
+                const findToolResponse = (requestIndex) => {
+                    for (let i = requestIndex + 1; i < messages.length; i++) {
+                        if (messages[i].Type === 'tool-call-response') {
+                            return messages[i];
+                        }
+                        // Stop looking if we hit another request or different message type
+                        if (messages[i].Type === 'tool-call-request' || messages[i].Type === 'text') {
+                            break;
+                        }
+                    }
+                    return null;
+                };
+
+                const MessageWrapper = ({ children, className = "" }) => (
+                    <div className={"message-enter mb-6 " + className}>
+                        <div className="flex items-start space-x-3">
+                            <div className={"flex-shrink-0 w-8 h-8 rounded-full " + sourceInfo.bg + " flex items-center justify-center text-sm"}>
+                                {sourceInfo.avatar}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                                <div className={"text-sm font-medium " + sourceInfo.color + " mb-1"}>
+                                    {sourceInfo.name}
+                                </div>
+                                {children}
+                            </div>
+                        </div>
+                    </div>
+                );
+
+                switch (message.Type) {
+                    case 'text':
+                    case 'user-input-request':
+                        return (
+                            <MessageWrapper key={index}>
+                                <div className="prose text-gray-700 leading-relaxed"
+                                     dangerouslySetInnerHTML={{ __html: formatMessage(message.Payload) }} />
+                            </MessageWrapper>
+                        );
+                    
+                    case 'error':
+                        return (
+                            <MessageWrapper key={index} className="error-message">
+                                <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+                                    <div className="flex items-center">
+                                        <span className="text-red-600 text-lg mr-2">⚠️</span>
+                                        <div className="text-red-800 font-medium">Error</div>
+                                    </div>
+                                    <div className="text-red-700 mt-1">{message.Payload}</div>
+                                </div>
+                            </MessageWrapper>
+                        );
+                    
+                    case 'tool-call-request':
+                        const toolResponse = findToolResponse(index);
+                        const isCompleted = toolResponse !== null;
+                        const isOutputExpanded = expandedOutputs.has(index);
+                        
+                        // Extract stdout from the tool response
+                        const getOutputText = (response) => {
+                            if (!response || !response.Payload) return '';
+                            
+                            let payload = response.Payload;
+                            if (typeof payload === 'string') {
+                                try {
+                                    payload = JSON.parse(payload);
+                                } catch (e) {
+                                    return payload; // Return as-is if not valid JSON
+                                }
+                            }
+                            
+                            // Try to extract stdout field, fallback to full payload
+                            if (payload && payload.stdout) {
+                                return payload.stdout;
+                            } else if (payload && typeof payload === 'object') {
+                                return JSON.stringify(payload, null, 2);
+                            } else {
+                                return String(payload);
+                            }
+                        };
+                        
+                        const outputText = isCompleted ? getOutputText(toolResponse) : '';
+                        const hasOutput = outputText && outputText.trim().length > 0;
+                        
+                        return (
+                            <MessageWrapper key={index}>
+                                <div className={"border rounded-lg p-4 " + (isCompleted ? "border-emerald-200 bg-emerald-50" : "border-blue-200 bg-blue-50")}>
+                                    <div className="flex items-center">
+                                        {isCompleted ? (
+                                            <span className="text-emerald-600 text-lg mr-3">✅</span>
+                                        ) : (
+                                            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600 mr-3"></div>
+                                        )}
+                                        <span className={"font-medium " + (isCompleted ? "text-emerald-800" : "text-blue-800")}>
+                                            {isCompleted ? "Completed" : "Executing"}
+                                        </span>
+                                    </div>
+                                    <div className={"font-mono text-sm mt-2 rounded px-3 py-2 " + (isCompleted ? "text-emerald-700 bg-emerald-100" : "text-blue-700 bg-blue-100")}>
+                                        {message.Payload}
+                                    </div>
+                                    {isCompleted && hasOutput && (
+                                        <div className="mt-3 pt-3 border-t border-emerald-200">
+                                            <button 
+                                                onClick={() => toggleOutput(index)}
+                                                className="flex items-center space-x-2 text-emerald-600 hover:text-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-1 rounded px-2 py-1 transition-colors"
+                                            >
+                                                <span className="text-xs font-medium">
+                                                    {isOutputExpanded ? 'Hide output' : 'Show output'}
+                                                </span>
+                                                <svg 
+                                                    className={"w-3 h-3 transition-transform duration-200 " + (isOutputExpanded ? "rotate-180" : "")}
+                                                    fill="none" 
+                                                    stroke="currentColor" 
+                                                    viewBox="0 0 24 24"
+                                                >
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                                                </svg>
+                                            </button>
+                                            {isOutputExpanded && (
+                                                <div className="mt-2 text-sm text-emerald-700 bg-emerald-100 rounded px-3 py-2 font-mono text-xs overflow-x-auto max-h-96 overflow-y-auto">
+                                                    <pre className="whitespace-pre-wrap">{outputText}</pre>
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            </MessageWrapper>
+                        );
+                    
+                    case 'tool-call-response':
+                        // Skip rendering individual tool responses since they're shown with the request
+                        return null;
+                    
+                    case 'user-choice-request':
+                        const choiceRequest = message.Payload;
+                        return (
+                            <MessageWrapper key={index}>
+                                <div className="border border-amber-200 bg-amber-50 rounded-xl p-6 shadow-sm">
+                                    <div className="flex items-center mb-4">
+                                        <span className="text-amber-600 text-lg mr-2">🤔</span>
+                                        <span className="text-amber-800 font-semibold">Decision Required</span>
+                                    </div>
+                                    <div className="prose text-gray-700 mb-4"
+                                         dangerouslySetInnerHTML={{ __html: formatMessage(choiceRequest.Prompt) }} />
+                                    <div className="space-y-3">
+                                        {choiceRequest.Options.map((option, idx) => (
+                                            <button
+                                                key={idx}
+                                                onClick={() => chooseOption(idx + 1)}
+                                                className="choice-button w-full text-left px-4 py-3 bg-white border border-gray-200 rounded-lg hover:border-brand-300 hover:bg-brand-50 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
+                                            >
+                                                <div className="flex items-center">
+                                                    <span className="flex-shrink-0 w-6 h-6 bg-brand-100 text-brand-700 rounded-full flex items-center justify-center text-sm font-medium mr-3">
+                                                        {idx + 1}
+                                                    </span>
+                                                    <span className="text-gray-700 font-medium">{option.label}</span>
+                                                </div>
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                            </MessageWrapper>
+                        );
+                    
+                    default:
+                        return (
+                            <MessageWrapper key={index}>
+                                <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+                                    <div className="text-yellow-800 font-medium mb-2">Debug Information</div>
+                                    <pre className="text-xs text-yellow-700 overflow-x-auto font-mono">
+                                        {JSON.stringify(message, null, 2)}
+                                    </pre>
+                                </div>
+                            </MessageWrapper>
+                        );
+                }
+            };
+
+            const canSendMessage = agentState === 'idle' || agentState === 'done' || agentState === 'waiting-for-input';
+            const isWaitingForChoice = agentState === 'waiting-for-input' && messages.length > 0 && 
+                messages[messages.length - 1].Type === 'user-choice-request';
+
+            const getInputPlaceholder = () => {
+                if (isWaitingForChoice) return "Type yes/no or a number, or click an option above...";
+                if (canSendMessage) return "Ask me anything about Kubernetes...";
+                return "AI is working...";
+            };
+
+            // Show typing indicator when AI is working
+            const showTypingIndicator = agentState === 'running';
+
+            // Typing indicator component
+            const TypingIndicator = () => (
+                <div className="message-enter mb-6">
+                    <div className="flex items-start space-x-3">
+                        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-emerald-50 flex items-center justify-center text-sm">
+                            🤖
+                        </div>
+                        <div className="flex-1 min-w-0">
+                            <div className="text-sm font-medium text-emerald-700 mb-1">
+                                AI Assistant
+                            </div>
+                            <div className="flex items-center space-x-2">
+                                <div className="flex items-center space-x-1">
+                                    <div className="typing-dot"></div>
+                                    <div className="typing-dot"></div>
+                                    <div className="typing-dot"></div>
+                                </div>
+                                <span className="text-sm text-gray-500">working on it...</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+
+            const getAgentStatusInfo = () => {
+                switch (agentState) {
+                    case 'idle': return { text: 'Ready', color: 'text-emerald-600', bgColor: 'bg-emerald-100', icon: '✅' };
+                    case 'done': return { text: 'Ready', color: 'text-emerald-600', bgColor: 'bg-emerald-100', icon: '✅' };
+                    case 'waiting-for-input': return isWaitingForChoice 
+                        ? { text: 'Waiting for choice', color: 'text-amber-600', bgColor: 'bg-amber-100', icon: '🤔' }
+                        : { text: 'Ready', color: 'text-emerald-600', bgColor: 'bg-emerald-100', icon: '✅' };
+                    case 'running': return { text: 'Working', color: 'text-blue-600', bgColor: 'bg-blue-100', icon: '⚡' };
+                    case 'initializing': return { text: 'Starting up', color: 'text-gray-600', bgColor: 'bg-gray-100', icon: '🔄' };
+                    case 'exited': return { text: 'Exited', color: 'text-red-600', bgColor: 'bg-red-100', icon: '🛑' };
+                    default: return { text: agentState, color: 'text-gray-600', bgColor: 'bg-gray-100', icon: '❓' };
+                }
+            };
+
+            const statusInfo = getAgentStatusInfo();
+
+            return (
+                <div className="flex flex-col h-screen bg-gradient-to-br from-slate-50 to-blue-50">
+                    {/* Header */}
+                    <div className="bg-white/80 backdrop-blur-sm border-b border-gray-200 px-6 py-4 shadow-sm">
+                        <div className="flex items-center justify-between">
+                            <div className="flex items-center space-x-3">
+                                <div className="w-8 h-8 bg-gradient-to-br from-brand-500 to-brand-600 rounded-lg flex items-center justify-center">
+                                    <span className="text-white font-bold text-sm">K8</span>
+                                </div>
+                                <div>
+                                    <h1 className="text-xl font-bold text-gray-900">kubectl-ai</h1>
+                                    <p className="text-sm text-gray-500">Your intelligent Kubernetes assistant</p>
+                                </div>
+                            </div>
+                            <div className="flex items-center space-x-4">
+                                <div className="flex items-center space-x-2">
+                                    <div className={"px-3 py-1 rounded-full text-xs font-medium " + statusInfo.bgColor + " " + statusInfo.color + " flex items-center space-x-1"}>
+                                        <span>{statusInfo.icon}</span>
+                                        <span>{statusInfo.text}</span>
+                                    </div>
+                                </div>
+                                <div className="flex items-center space-x-2">
+                                    <div className={"w-2 h-2 rounded-full " + (isConnected ? 'bg-emerald-500' : 'bg-red-500') + " " + (!isConnected ? 'status-pulse' : '')}></div>
+                                    <span className="text-sm text-gray-600">
+                                        {isConnected ? 'Connected' : 'Connecting...'}
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    {/* Messages Area */}
+                    <div className="flex-1 overflow-y-auto px-6 py-6 custom-scrollbar">
+                        <div className="max-w-4xl mx-auto">
+                            {messages.length === 0 ? (
+                                <div className="text-center py-16">
+                                    <div className="w-16 h-16 bg-gradient-to-br from-brand-500 to-brand-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                                        <span className="text-white text-2xl">🚀</span>
+                                    </div>
+                                    <h2 className="text-2xl font-bold text-gray-900 mb-2">Welcome to kubectl-ai</h2>
+                                    <p className="text-gray-600 mb-8 max-w-md mx-auto">
+                                        I'm your intelligent Kubernetes assistant. I can help you manage deployments, 
+                                        troubleshoot issues, and answer questions about your cluster.
+                                    </p>
+                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 max-w-2xl mx-auto">
+                                        <div className="bg-white rounded-lg p-4 shadow-sm border border-gray-200">
+                                            <div className="text-2xl mb-2">⚙️</div>
+                                            <div className="font-medium text-gray-900">Manage Resources</div>
+                                            <div className="text-sm text-gray-600">Scale deployments, update configs</div>
+                                        </div>
+                                        <div className="bg-white rounded-lg p-4 shadow-sm border border-gray-200">
+                                            <div className="text-2xl mb-2">🔍</div>
+                                            <div className="font-medium text-gray-900">Debug Issues</div>
+                                            <div className="text-sm text-gray-600">Find and fix problems quickly</div>
+                                        </div>
+                                        <div className="bg-white rounded-lg p-4 shadow-sm border border-gray-200">
+                                            <div className="text-2xl mb-2">📊</div>
+                                            <div className="font-medium text-gray-900">Get Insights</div>
+                                            <div className="text-sm text-gray-600">Monitor and analyze your cluster</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            ) : (
+                                <>
+                                    {messages.map((message, index) => renderMessage(message, index))}
+                                    {showTypingIndicator && <TypingIndicator />}
+                                </>
+                            )}
+                            <div ref={messagesEndRef} />
+                        </div>
+                    </div>
+                    
+                    {/* Input Area */}
+                    <div className="bg-white/80 backdrop-blur-sm border-t border-gray-200 p-6">
+                        <div className="max-w-4xl mx-auto">
+                            <form onSubmit={handleSubmit} className="flex space-x-3">
+                                <div className="flex-1 relative">
+                                    <input
+                                        ref={inputRef}
+                                        type="text"
+                                        value={input}
+                                        onChange={(e) => setInput(e.target.value)}
+                                        placeholder={getInputPlaceholder()}
+                                        disabled={!canSendMessage}
+                                        className="w-full px-4 py-3 pr-12 bg-white border border-gray-300 rounded-xl shadow-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent disabled:bg-gray-50 disabled:text-gray-500 placeholder-gray-400"
+                                    />
+                                    {agentState === 'running' && (
+                                        <div className="absolute right-3 top-1/2 transform -translate-y-1/2">
+                                            <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-brand-500"></div>
+                                        </div>
+                                    )}
+                                </div>
+                                <button
+                                    type="submit"
+                                    disabled={!canSendMessage || !input.trim()}
+                                    className="px-6 py-3 bg-gradient-to-r from-brand-500 to-brand-600 text-white rounded-xl hover:from-brand-600 hover:to-brand-700 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 font-medium shadow-sm"
+                                >
+                                    Send
+                                </button>
+                            </form>
+                            <div className="flex items-center justify-center mt-3 text-xs text-gray-500">
+                                <span>💡 Try: "scale nginx to 3 replicas" or "show me pod status"</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
+</body>
+</html> 
