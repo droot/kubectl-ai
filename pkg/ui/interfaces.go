@@ -16,6 +16,7 @@ package ui
 
 import (
 	"context"
+	"fmt"
 )
 
 // UI is the interface that defines the capabilities of assisant's user interface.
@@ -26,4 +27,32 @@ type UI interface {
 
 	// Run starts the UI and blocks until the context is done.
 	Run(ctx context.Context) error
+}
+
+// Type is the type of user interface.
+type Type string
+
+const (
+	UITypeTerminal Type = "terminal"
+	UITypeWeb      Type = "web"
+	UITypeTUI      Type = "tui"
+)
+
+// Implement pflag.Value for UIType
+func (u *Type) Set(s string) error {
+	switch s {
+	case "terminal", "web", "tui":
+		*u = Type(s)
+		return nil
+	default:
+		return fmt.Errorf("invalid UI type: %s", s)
+	}
+}
+
+func (u *Type) String() string {
+	return string(*u)
+}
+
+func (u *Type) Type() string {
+	return "UIType"
 }

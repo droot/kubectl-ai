@@ -39,13 +39,20 @@ import (
 var defaultSystemPromptTemplate string
 
 type Agent struct {
-	Input  chan any
+	// Input is the channel to receive user input.
+	Input chan any
+
+	// Output is the channel to send messages to the UI.
 	Output chan any
 
 	// RunOnce indicates if the agent should run only once.
 	// If true, the agent will run only once and then exit.
 	// If false, the agent will run in a loop until the context is done.
 	RunOnce bool
+
+	// InitialQuery is the initial query to the agent.
+	// If provided, the agent will run only once and then exit.
+	InitialQuery string
 
 	// tool calls that are pending execution
 	// These will typically be all the tool calls suggested by the LLM in the
@@ -106,8 +113,8 @@ func (s *Agent) Session() *api.Session {
 	return s.session
 }
 
-// sendMessage creates a new message, adds it to the session, and sends it to the output channel
-func (c *Agent) sendMessage(source api.MessageSource, messageType api.MessageType, payload any) *api.Message {
+// addMessage creates a new message, adds it to the session, and sends it to the output channel
+func (c *Agent) addMessage(source api.MessageSource, messageType api.MessageType, payload any) *api.Message {
 	message := &api.Message{
 		ID:        uuid.New().String(),
 		Source:    source,
@@ -123,11 +130,15 @@ func (c *Agent) sendMessage(source api.MessageSource, messageType api.MessageTyp
 
 // setAgentState updates the agent state and ensures LastModified is updated
 func (c *Agent) setAgentState(newState api.AgentState) {
-	if c.session.AgentState != newState {
-		klog.Infof("Agent state changing from %s to %s", c.session.AgentState, newState)
+	if c.AgentState() != newState {
+		klog.Infof("Agent state changing from %s to %s", c.AgentState(), newState)
 		c.session.AgentState = newState
 		c.session.LastModified = time.Now()
 	}
+}
+
+func (c *Agent) AgentState() api.AgentState {
+	return c.session.AgentState
 }
 
 func (s *Agent) Init(ctx context.Context) error {
@@ -139,6 +150,10 @@ func (s *Agent) Init(ctx context.Context) error {
 	// when we support session, we will need to initialize this with the
 	// current history of the conversation.
 	s.currChatContent = []any{}
+
+	if s.InitialQuery == "" && s.RunOnce {
+		return fmt.Errorf("RunOnce mode requires an initial query to be provided")
+	}
 
 	// TODO: this is ephemeral for now, but in the future, we will support
 	// session persistence.
@@ -228,167 +243,119 @@ func (c *Agent) Close() error {
 func (c *Agent) Run(ctx context.Context, initialQuery string) error {
 	log := klog.FromContext(ctx)
 
-	log.Info("Starting agent loop")
-
-	if initialQuery != "" {
-		log.Info("Initial query provided", "initialQuery", initialQuery)
-		// Process the initial query immediately
-		c.sendMessage(api.MessageSourceUser, api.MessageTypeText, initialQuery)
-
-		// Handle meta query first
-		answer, err := c.handleMetaQuery(ctx, initialQuery)
-		if err != nil {
-			log.Error(err, "error handling meta query")
-			c.setAgentState(api.AgentStateDone)
-			c.pendingFunctionCalls = []ToolCallAnalysis{}
-			c.sendMessage(api.MessageSourceAgent, api.MessageTypeError, "Error: "+err.Error())
-
-			// In RunOnce mode, exit when there's an error
-			if c.RunOnce {
-				c.setAgentState(api.AgentStateExited)
-			}
-		} else if answer != "" {
-			// we handled the meta query, so we don't need to run the agentic loop
-			c.setAgentState(api.AgentStateDone)
-			c.pendingFunctionCalls = []ToolCallAnalysis{}
-			c.sendMessage(api.MessageSourceAgent, api.MessageTypeText, answer)
-
-			// In RunOnce mode, exit after handling meta query
-			if c.RunOnce {
-				c.setAgentState(api.AgentStateExited)
+	log.Info("Starting agent loop", "initialQuery", initialQuery, "runOnce", c.RunOnce)
+	go func() {
+		if initialQuery != "" {
+			c.addMessage(api.MessageSourceUser, api.MessageTypeText, initialQuery)
+			answer, err := c.handleMetaQuery(ctx, initialQuery)
+			if err != nil {
+				log.Error(err, "error handling meta query")
+				c.setAgentState(api.AgentStateDone)
+				c.pendingFunctionCalls = []ToolCallAnalysis{}
+				c.addMessage(api.MessageSourceAgent, api.MessageTypeError, "Error: "+err.Error())
+			} else if answer != "" {
+				// we handled the meta query, so we don't need to run the agentic loop
+				c.setAgentState(api.AgentStateDone)
+				c.pendingFunctionCalls = []ToolCallAnalysis{}
+				c.addMessage(api.MessageSourceAgent, api.MessageTypeText, answer)
+			} else {
+				// Start the agentic loop with the initial query
+				c.setAgentState(api.AgentStateRunning)
+				c.currIteration = 0
+				c.currChatContent = []any{initialQuery}
+				c.pendingFunctionCalls = []ToolCallAnalysis{}
 			}
 		} else {
-			// Start the agentic loop with the initial query
-			c.setAgentState(api.AgentStateRunning)
-			c.currIteration = 0
-			c.currChatContent = []any{initialQuery}
-			c.pendingFunctionCalls = []ToolCallAnalysis{}
+			greetingMessage := "Hey there, what can I help you with today ?"
+			c.addMessage(api.MessageSourceAgent, api.MessageTypeUserInputRequest, greetingMessage)
 		}
-	} else {
-		// In RunOnce mode, if no initial query is provided, exit with an error
-		if c.RunOnce {
-			log.Error(nil, "RunOnce mode requires an initial query to be provided")
-			c.setAgentState(api.AgentStateExited)
-			c.sendMessage(api.MessageSourceAgent, api.MessageTypeError, "Error: RunOnce mode requires an initial query to be provided")
-			return nil
-		}
-
-		greetingMessage := "Hey there, what can I help you with today ?"
-		c.setAgentState(api.AgentStateIdle)
-		c.sendMessage(api.MessageSourceAgent, api.MessageTypeUserInputRequest, greetingMessage)
-	}
-
-	// main agent loop
-	go func() {
 		for {
 			var userInput any
-			log.Info("Agent loop iteration", "state", c.session.AgentState)
-			switch c.session.AgentState {
+			log.Info("Agent loop iteration", "state", c.AgentState())
+			switch c.AgentState() {
 			case api.AgentStateIdle, api.AgentStateDone:
-				// In RunOnce mode, if we need user input, exit with error
+				// In RunOnce mode, we are done, so exit
 				if c.RunOnce {
-					log.Error(nil, "RunOnce mode cannot handle user input requests")
+					log.Info("RunOnce mode, exiting agent loop")
 					c.setAgentState(api.AgentStateExited)
-					c.sendMessage(api.MessageSourceAgent, api.MessageTypeError, "Error: RunOnce mode cannot handle user input requests")
 					return
 				}
-
-				log.Info("Sending user input request message")
-				c.sendMessage(api.MessageSourceAgent, api.MessageTypeUserInputRequest, ">>>")
+				log.Info("initiating user input")
+				c.addMessage(api.MessageSourceAgent, api.MessageTypeUserInputRequest, ">>>")
 				select {
 				case <-ctx.Done():
 					log.Info("Agent loop done")
 					return
 				case userInput = <-c.Input:
 					log.Info("Received input from channel", "userInput", userInput)
+					if userInput == io.EOF {
+						log.Info("Agent loop done, EOF received")
+						return
+					}
+					query, ok := userInput.(*api.UserInputResponse)
+					if !ok {
+						log.Error(nil, "Received unexpected input from channel", "userInput", userInput)
+						return
+					}
+					c.addMessage(api.MessageSourceUser, api.MessageTypeText, query.Query)
+					// we don't need the agentic loop for meta queries
+					// for ex. model, tools, etc.
+					answer, err := c.handleMetaQuery(ctx, query.Query)
+					if err != nil {
+						log.Error(err, "error handling meta query")
+						c.setAgentState(api.AgentStateDone)
+						c.pendingFunctionCalls = []ToolCallAnalysis{}
+						c.addMessage(api.MessageSourceAgent, api.MessageTypeError, "Error: "+err.Error())
+						continue
+					}
+					if answer != "" {
+						// we handled the meta query, so we don't need to run the agentic loop
+						c.setAgentState(api.AgentStateDone)
+						c.pendingFunctionCalls = []ToolCallAnalysis{}
+						c.addMessage(api.MessageSourceAgent, api.MessageTypeText, answer)
+						continue
+					}
+
+					c.setAgentState(api.AgentStateRunning)
+					c.currIteration = 0
+					c.currChatContent = []any{query.Query}
+					c.pendingFunctionCalls = []ToolCallAnalysis{}
+					log.Info("Set agent state to running, will process agentic loop", "currIteration", c.currIteration, "currChatContent", len(c.currChatContent))
 				}
 			case api.AgentStateWaitingForInput:
 				// In RunOnce mode, if we need user choice, exit with error
 				if c.RunOnce {
 					log.Error(nil, "RunOnce mode cannot handle user choice requests")
 					c.setAgentState(api.AgentStateExited)
-					c.sendMessage(api.MessageSourceAgent, api.MessageTypeError, "Error: RunOnce mode cannot handle user choice requests")
+					c.addMessage(api.MessageSourceAgent, api.MessageTypeError, "Error: RunOnce mode cannot handle user choice requests")
 					return
 				}
-
 				select {
 				case <-ctx.Done():
 					log.Info("Agent loop done")
 					return
 				case userInput = <-c.Input:
-					// c.setAgentState(api.AgentStateRunning)
-				}
-			case api.AgentStateRunning:
-				// Agent is running, don't wait for input, just continue to process the agentic loop
-				log.Info("Agent is in running state, processing agentic loop")
-				userInput = nil // No user input needed when running
-			case api.AgentStateExited:
-				// Agent has exited in RunOnce mode, stop the loop
-				log.Info("Agent exited in RunOnce mode")
-				return
-			}
-
-			if userInput == io.EOF {
-				log.Info("Agent loop done")
-				return
-			}
-
-			if userInput != nil {
-				log.Info("User input received", "userInput", userInput, "type", fmt.Sprintf("%T", userInput))
-				switch query := userInput.(type) {
-				case *api.UserInputResponse:
-					log.Info("Text input", "text", query.Query)
-
-					c.sendMessage(api.MessageSourceUser, api.MessageTypeText, query.Query)
-					if c.session.AgentState == api.AgentStateIdle || c.session.AgentState == api.AgentStateDone {
-						log.Info("Transitioning to running state", "fromState", c.session.AgentState, "input", query.Query)
-
-						// we don't need the agentic loop for meta queries
-						// for ex. model, tools, etc.
-						answer, err := c.handleMetaQuery(ctx, query.Query)
-						if err != nil {
-							log.Error(err, "error handling meta query")
-							c.setAgentState(api.AgentStateDone)
-							c.pendingFunctionCalls = []ToolCallAnalysis{}
-							c.sendMessage(api.MessageSourceAgent, api.MessageTypeError, "Error: "+err.Error())
-							continue
-						}
-						if answer != "" {
-							// we handled the meta query, so we don't need to run the agentic loop
-							c.setAgentState(api.AgentStateDone)
-							c.pendingFunctionCalls = []ToolCallAnalysis{}
-							c.sendMessage(api.MessageSourceAgent, api.MessageTypeText, answer)
-							continue
-						}
-
-						c.setAgentState(api.AgentStateRunning)
-						c.currIteration = 0
-						c.currChatContent = []any{query.Query}
-						c.pendingFunctionCalls = []ToolCallAnalysis{}
-						log.Info("Set agent state to running, will process agentic loop", "currIteration", c.currIteration, "currChatContent", len(c.currChatContent))
-					} else {
-						klog.Errorf("invalid state: %v", c.session.AgentState)
-						continue
+					if userInput == io.EOF {
+						log.Info("Agent loop done, EOF received")
+						return
 					}
-				case *api.UserChoiceResponse:
-					if c.session.AgentState != api.AgentStateWaitingForInput {
-						klog.Errorf("invalid state for choice: %v", c.session.AgentState)
-						continue
+					choiceResponse, ok := userInput.(*api.UserChoiceResponse)
+					if !ok {
+						log.Error(nil, "Received unexpected input from channel", "userInput", userInput)
+						return
 					}
-					dispatchToolCalls := c.handleChoice(ctx, query)
+					dispatchToolCalls := c.handleChoice(ctx, choiceResponse)
 					if dispatchToolCalls {
 						if err := c.DispatchToolCalls(ctx); err != nil {
 							log.Error(err, "error dispatching tool calls")
 							c.setAgentState(api.AgentStateDone)
 							c.pendingFunctionCalls = []ToolCallAnalysis{}
 							c.session.LastModified = time.Now()
-
 							// In RunOnce mode, exit on tool execution error
 							if c.RunOnce {
 								c.setAgentState(api.AgentStateExited)
 								return
 							}
-
 							continue
 						}
 						// Clear pending function calls after execution
@@ -397,32 +364,27 @@ func (c *Agent) Run(ctx context.Context, initialQuery string) error {
 						c.currIteration = c.currIteration + 1
 					} else {
 						// if user has declined, we are done with this iteration
-						// c.setAgentState(api.AgentStateDone)
 						c.currIteration = c.currIteration + 1
 						c.pendingFunctionCalls = []ToolCallAnalysis{}
 						c.setAgentState(api.AgentStateRunning)
 						c.session.LastModified = time.Now()
 					}
-				default:
-					klog.Errorf("invalid user input: %v", userInput)
 				}
+			case api.AgentStateRunning:
+				// Agent is running, don't wait for input, just continue to process the agentic loop
+				log.Info("Agent is in running state, processing agentic loop")
+			case api.AgentStateExited:
+				log.Info("Agent exited in RunOnce mode")
+				return
 			}
 
-			if c.session.AgentState == api.AgentStateRunning {
-
+			if c.AgentState() == api.AgentStateRunning {
 				log.Info("Processing agentic loop", "currIteration", c.currIteration, "maxIterations", c.MaxIterations, "currChatContentLen", len(c.currChatContent))
 
 				if c.currIteration >= c.MaxIterations {
 					c.setAgentState(api.AgentStateDone)
 					c.pendingFunctionCalls = []ToolCallAnalysis{}
-					c.sendMessage(api.MessageSourceAgent, api.MessageTypeText, "Maximum number of iterations reached.")
-
-					// In RunOnce mode, exit when max iterations reached
-					if c.RunOnce {
-						c.setAgentState(api.AgentStateExited)
-						return
-					}
-
+					c.addMessage(api.MessageSourceAgent, api.MessageTypeText, "Maximum number of iterations reached.")
 					continue
 				}
 
@@ -432,13 +394,6 @@ func (c *Agent) Run(ctx context.Context, initialQuery string) error {
 					log.Error(err, "error sending streaming LLM response")
 					c.setAgentState(api.AgentStateDone)
 					c.pendingFunctionCalls = []ToolCallAnalysis{}
-
-					// In RunOnce mode, exit on LLM error
-					if c.RunOnce {
-						c.setAgentState(api.AgentStateExited)
-						return
-					}
-
 					continue
 				}
 
@@ -464,20 +419,16 @@ func (c *Agent) Run(ctx context.Context, initialQuery string) error {
 				// Process each part of the response
 				var functionCalls []gollm.FunctionCall
 
+				// accumulator for streamed text
 				var streamedText string
+				var llmError error
 
 				for response, err := range stream {
 					if err != nil {
 						log.Error(err, "error reading streaming LLM response")
+						llmError = err
 						c.setAgentState(api.AgentStateDone)
 						c.pendingFunctionCalls = []ToolCallAnalysis{}
-
-						// In RunOnce mode, exit on streaming response error
-						if c.RunOnce {
-							c.setAgentState(api.AgentStateExited)
-							return
-						}
-
 						break
 					}
 					if response == nil {
@@ -487,16 +438,10 @@ func (c *Agent) Run(ctx context.Context, initialQuery string) error {
 					// klog.Infof("response: %+v", response)
 
 					if len(response.Candidates()) == 0 {
+						llmError = fmt.Errorf("no candidates in response")
 						log.Error(nil, "No candidates in response")
 						c.setAgentState(api.AgentStateDone)
 						c.pendingFunctionCalls = []ToolCallAnalysis{}
-
-						// In RunOnce mode, exit on no candidates error
-						if c.RunOnce {
-							c.setAgentState(api.AgentStateExited)
-							return
-						}
-
 						break
 					}
 
@@ -516,12 +461,18 @@ func (c *Agent) Run(ctx context.Context, initialQuery string) error {
 						}
 					}
 				}
+				if llmError != nil {
+					log.Error(llmError, "error streaming LLM response")
+					c.setAgentState(api.AgentStateDone)
+					c.pendingFunctionCalls = []ToolCallAnalysis{}
+					c.addMessage(api.MessageSourceAgent, api.MessageTypeError, "Error: "+llmError.Error())
+					continue
+				}
 				log.Info("streamedText", "streamedText", streamedText)
 
 				if streamedText != "" {
-					c.sendMessage(api.MessageSourceModel, api.MessageTypeText, streamedText)
+					c.addMessage(api.MessageSourceModel, api.MessageTypeText, streamedText)
 				}
-
 				// If no function calls to be made, we're done
 				if len(functionCalls) == 0 {
 					log.Info("No function calls to be made, so most likely the task is completed, so we're done.")
@@ -529,18 +480,7 @@ func (c *Agent) Run(ctx context.Context, initialQuery string) error {
 					c.currChatContent = []any{}
 					c.currIteration = 0
 					c.pendingFunctionCalls = []ToolCallAnalysis{}
-
-					// Send a state change notification to the UI
 					log.Info("Agent task completed, transitioning to done state")
-
-					// In RunOnce mode, exit the goroutine when task is completed
-					if c.RunOnce {
-						log.Info("Task completed in RunOnce mode, exiting agent")
-						c.setAgentState(api.AgentStateExited)
-						return
-					}
-
-					// c.OutputCh <- ui.NewAgentTextBlock().WithText("Task completed.")
 					continue
 				}
 
@@ -550,13 +490,7 @@ func (c *Agent) Run(ctx context.Context, initialQuery string) error {
 					c.setAgentState(api.AgentStateDone)
 					c.pendingFunctionCalls = []ToolCallAnalysis{}
 					c.session.LastModified = time.Now()
-
-					// In RunOnce mode, exit on tool call analysis error
-					if c.RunOnce {
-						c.setAgentState(api.AgentStateExited)
-						return
-					}
-
+					c.addMessage(api.MessageSourceAgent, api.MessageTypeError, "Error: "+err.Error())
 					continue
 				}
 
@@ -577,8 +511,7 @@ func (c *Agent) Run(ctx context.Context, initialQuery string) error {
 				if interactiveToolCallIndex >= 0 {
 					// Show error block for both shim enabled and disabled modes
 					errorMessage := fmt.Sprintf("  %s\n", toolCallAnalysisResults[interactiveToolCallIndex].IsInteractiveError.Error())
-					// c.doc.AddBlock(errorBlock)
-					c.sendMessage(api.MessageSourceAgent, api.MessageTypeError, errorMessage)
+					c.addMessage(api.MessageSourceAgent, api.MessageTypeError, errorMessage)
 
 					if c.EnableToolUseShim {
 						// Add the error as an observation
@@ -596,7 +529,8 @@ func (c *Agent) Run(ctx context.Context, initialQuery string) error {
 						})
 					}
 					c.pendingFunctionCalls = []ToolCallAnalysis{} // reset pending function calls
-					continue                                      // Skip execution for interactive commands
+					c.currIteration = c.currIteration + 1
+					continue // Skip execution for interactive commands
 				}
 
 				if !c.SkipPermissions && modifiesResourceToolCallIndex >= 0 {
@@ -611,7 +545,7 @@ func (c *Agent) Run(ctx context.Context, initialQuery string) error {
 
 						log.Error(nil, "RunOnce mode cannot handle permission requests", "commands", commandDescriptions)
 						c.setAgentState(api.AgentStateExited)
-						c.sendMessage(api.MessageSourceAgent, api.MessageTypeError, errorMessage)
+						c.addMessage(api.MessageSourceAgent, api.MessageTypeError, errorMessage)
 						return
 					}
 
@@ -620,7 +554,7 @@ func (c *Agent) Run(ctx context.Context, initialQuery string) error {
 						commandDescriptions = append(commandDescriptions, call.ParsedToolCall.Description())
 					}
 					confirmationPrompt := "The following commands require your approval to run:\n* " + strings.Join(commandDescriptions, "\n* ")
-					confirmationPrompt += "\nDo you want to proceed ?"
+					confirmationPrompt += "\n\nDo you want to proceed ?"
 
 					choiceRequest := &api.UserChoiceRequest{
 						Prompt: confirmationPrompt,
@@ -631,34 +565,25 @@ func (c *Agent) Run(ctx context.Context, initialQuery string) error {
 						},
 					}
 					c.setAgentState(api.AgentStateWaitingForInput)
-					c.sendMessage(api.MessageSourceAgent, api.MessageTypeUserChoiceRequest, choiceRequest)
+					c.addMessage(api.MessageSourceAgent, api.MessageTypeUserChoiceRequest, choiceRequest)
 					// Request input from the user by sending a message on the output channel.
 					// Remaining part of the loop will be now resumed when we receive a choice input
 					// from the user.
-
 					continue
 				}
 
 				// we are here means we are in the clear to dispatch the tool calls
-
 				if err := c.DispatchToolCalls(ctx); err != nil {
 					log.Error(err, "error dispatching tool calls")
 					c.setAgentState(api.AgentStateDone)
 					c.pendingFunctionCalls = []ToolCallAnalysis{}
 					c.session.LastModified = time.Now()
-
-					// In RunOnce mode, exit on tool execution error
-					if c.RunOnce {
-						c.setAgentState(api.AgentStateExited)
-						return
-					}
-
+					c.addMessage(api.MessageSourceAgent, api.MessageTypeError, "Error: "+err.Error())
 					continue
 				}
-
 				c.currIteration = c.currIteration + 1
 				c.pendingFunctionCalls = []ToolCallAnalysis{}
-				log.Info("Tool calls dispatched successfully", "currIteration", c.currIteration, "currChatContentLen", len(c.currChatContent), "agentState", c.session.AgentState)
+				log.Info("Tool calls dispatched successfully", "currIteration", c.currIteration, "currChatContentLen", len(c.currChatContent), "agentState", c.AgentState())
 			}
 		}
 	}()
@@ -704,7 +629,7 @@ func (c *Agent) DispatchToolCalls(ctx context.Context) error {
 		// Only show "Running" message and proceed with execution for non-interactive commands
 		toolDescription := call.ParsedToolCall.Description()
 
-		c.sendMessage(api.MessageSourceModel, api.MessageTypeToolCallRequest, toolDescription)
+		c.addMessage(api.MessageSourceModel, api.MessageTypeToolCallRequest, toolDescription)
 
 		output, err := call.ParsedToolCall.InvokeTool(ctx, tools.InvokeToolOptions{
 			Kubeconfig: c.Kubeconfig,
@@ -717,7 +642,7 @@ func (c *Agent) DispatchToolCalls(ctx context.Context) error {
 
 		// Handle timeout message using UI blocks
 		if execResult, ok := output.(*tools.ExecResult); ok && execResult != nil && execResult.StreamType == "timeout" {
-			c.sendMessage(api.MessageSourceAgent, api.MessageTypeError, "\nTimeout reached after 7 seconds\n")
+			c.addMessage(api.MessageSourceAgent, api.MessageTypeError, "\nTimeout reached after 7 seconds\n")
 		}
 		// Add the tool call result to maintain conversation flow
 		var payload any
@@ -742,7 +667,7 @@ func (c *Agent) DispatchToolCalls(ctx context.Context) error {
 				Result: result,
 			})
 		}
-		c.sendMessage(api.MessageSourceAgent, api.MessageTypeToolCallResponse, payload)
+		c.addMessage(api.MessageSourceAgent, api.MessageTypeToolCallResponse, payload)
 	}
 	return nil
 }
@@ -810,14 +735,14 @@ func (c *Agent) handleChoice(ctx context.Context, choice *api.UserChoiceResponse
 		})
 		c.pendingFunctionCalls = []ToolCallAnalysis{}
 		dispatchToolCalls = false
-		c.sendMessage(api.MessageSourceAgent, api.MessageTypeError, "Operation was skipped. User declined to run this operation.")
+		c.addMessage(api.MessageSourceAgent, api.MessageTypeError, "Operation was skipped. User declined to run this operation.")
 	default:
 		// This case should technically not be reachable due to AskForConfirmation loop
 		err := fmt.Errorf("invalid confirmation choice: %q", choice.Choice)
 		log.Error(err, "Invalid choice received from AskForConfirmation")
 		c.pendingFunctionCalls = []ToolCallAnalysis{}
 		dispatchToolCalls = false
-		c.sendMessage(api.MessageSourceAgent, api.MessageTypeError, "Invalid choice received. Cancelling operation.")
+		c.addMessage(api.MessageSourceAgent, api.MessageTypeError, "Invalid choice received. Cancelling operation.")
 	}
 	return dispatchToolCalls
 }

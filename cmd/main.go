@@ -105,40 +105,13 @@ type Options struct {
 	RemoveWorkDir          bool     `json:"removeWorkDir,omitempty"`
 	ToolConfigPaths        []string `json:"toolConfigPaths,omitempty"`
 
-	// UserInterface is the type of user interface to use.
-	UserInterface UserInterface `json:"userInterface,omitempty"`
+	// UIType is the type of user interface to use.
+	UIType ui.Type `json:"uiType,omitempty"`
 	// UIListenAddress is the address to listen for the web UI.
 	UIListenAddress string `json:"uiListenAddress,omitempty"`
 
 	// SkipVerifySSL is a flag to skip verifying the SSL certificate of the LLM provider.
 	SkipVerifySSL bool `json:"skipVerifySSL,omitempty"`
-}
-
-type UserInterface string
-
-const (
-	UserInterfaceTerminal UserInterface = "terminal"
-	UserInterfaceWeb      UserInterface = "web"
-	UserInterfaceTUI      UserInterface = "tui"
-)
-
-// Implement pflag.Value for UserInterface
-func (u *UserInterface) Set(s string) error {
-	switch s {
-	case "terminal", "web", "tui":
-		*u = UserInterface(s)
-		return nil
-	default:
-		return fmt.Errorf("invalid user interface: %s", s)
-	}
-}
-
-func (u *UserInterface) String() string {
-	return string(*u)
-}
-
-func (u *UserInterface) Type() string {
-	return "UserInterface"
 }
 
 var defaultToolConfigPaths = []string{
@@ -173,7 +146,7 @@ func (o *Options) InitDefaults() {
 	o.RemoveWorkDir = false
 	o.ToolConfigPaths = defaultToolConfigPaths
 	// Default to terminal UI
-	o.UserInterface = UserInterfaceTerminal
+	o.UIType = ui.UITypeTerminal
 	// Default UI listen address for HTML UI
 	o.UIListenAddress = "localhost:8888"
 
@@ -305,7 +278,7 @@ func (opt *Options) bindCLIFlags(f *pflag.FlagSet) error {
 	f.BoolVar(&opt.EnableToolUseShim, "enable-tool-use-shim", opt.EnableToolUseShim, "enable tool use shim")
 	f.BoolVar(&opt.Quiet, "quiet", opt.Quiet, "run in non-interactive mode, requires a query to be provided as a positional argument")
 
-	f.Var(&opt.UserInterface, "user-interface", "user interface mode to use. Supported values: terminal, html.")
+	f.Var(&opt.UIType, "ui-type", "user interface type to use. Supported values: terminal, web, tui.")
 	f.StringVar(&opt.UIListenAddress, "ui-listen-address", opt.UIListenAddress, "address to listen for the HTML UI.")
 	f.BoolVar(&opt.SkipVerifySSL, "skip-verify-ssl", opt.SkipVerifySSL, "skip verifying the SSL certificate of the LLM provider")
 
@@ -392,6 +365,7 @@ func RunRootCommand(ctx context.Context, opt Options, args []string) error {
 		EnableToolUseShim:  opt.EnableToolUseShim,
 		MCPClientEnabled:   opt.MCPClient,
 		RunOnce:            opt.Quiet,
+		InitialQuery:       queryFromCmd,
 	}
 
 	err = k8sAgent.Init(ctx)
@@ -401,8 +375,8 @@ func RunRootCommand(ctx context.Context, opt Options, args []string) error {
 	defer k8sAgent.Close()
 
 	var userInterface ui.UI
-	switch opt.UserInterface {
-	case UserInterfaceTerminal:
+	switch opt.UIType {
+	case ui.UITypeTerminal:
 		// since stdin is already consumed, we use TTY for taking input from user
 		useTTYForInput := hasInputData
 
@@ -413,7 +387,7 @@ func RunRootCommand(ctx context.Context, opt Options, args []string) error {
 		}
 		userInterface = u
 
-	case UserInterfaceWeb:
+	case ui.UITypeWeb:
 		var webUI *html.HTMLUserInterface
 		webUI, err = html.NewHTMLUserInterface(k8sAgent, opt.UIListenAddress, recorder)
 		if err != nil {
@@ -427,16 +401,13 @@ func RunRootCommand(ctx context.Context, opt Options, args []string) error {
 		}()
 		userInterface = webUI
 
-	case UserInterfaceTUI:
+	case ui.UITypeTUI:
 		userInterface = ui.NewTUI(k8sAgent)
 
 	default:
-		return fmt.Errorf("user-interface mode %q is not known", opt.UserInterface)
+		return fmt.Errorf("user-interface mode %q is not known", opt.UIType)
 	}
 
-	if opt.Quiet && queryFromCmd == "" {
-		return fmt.Errorf("quiet mode requires a query to be provided as a positional argument")
-	}
 	return repl(ctx, queryFromCmd, userInterface, k8sAgent)
 }
 
@@ -488,8 +459,6 @@ func repl(ctx context.Context, initialQuery string, ui ui.UI, agent *agent.Agent
 	if err != nil {
 		return fmt.Errorf("running agent: %w", err)
 	}
-
-	defer agent.Close()
 
 	err = ui.Run(ctx)
 	if err != nil {
