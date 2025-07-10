@@ -201,20 +201,27 @@ func (o *Options) LoadConfigurationFile() error {
 }
 
 func main() {
-	ctx := context.Background()
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
 
 	go func() {
-		sig := <-sigCh
+		<-ctx.Done()
+		// restore default behavior for a second signal
+		signal.Stop(make(chan os.Signal))
+		cancel()
 		klog.Flush()
-		fmt.Fprintf(os.Stderr, "Received signal, shutting down... %s\n", sig)
-		os.Exit(0)
+		fmt.Fprintf(os.Stderr, "\nReceived signal, shutting down gracefully... (press Ctrl+C again to force)\n")
 	}()
 
 	if err := run(ctx); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		// Don't print error if it's a context cancellation
+		if !errors.Is(err, context.Canceled) {
+			fmt.Fprintln(os.Stderr, err)
+		}
+		// Exit with non-zero status code on error, unless it's a graceful shutdown.
+		if errors.Is(err, context.Canceled) {
+			os.Exit(0)
+		}
 		os.Exit(1)
 	}
 }
@@ -379,31 +386,17 @@ func RunRootCommand(ctx context.Context, opt Options, args []string) error {
 	case ui.UITypeTerminal:
 		// since stdin is already consumed, we use TTY for taking input from user
 		useTTYForInput := hasInputData
-
-		var u ui.UI
-		u, err = ui.NewTerminalUI(k8sAgent, useTTYForInput, recorder)
+		userInterface, err = ui.NewTerminalUI(k8sAgent, useTTYForInput, recorder)
 		if err != nil {
-			return err
+			return fmt.Errorf("creating terminal UI: %w", err)
 		}
-		userInterface = u
-
 	case ui.UITypeWeb:
-		var webUI *html.HTMLUserInterface
-		webUI, err = html.NewHTMLUserInterface(k8sAgent, opt.UIListenAddress, recorder)
+		userInterface, err = html.NewHTMLUserInterface(k8sAgent, opt.UIListenAddress, recorder)
 		if err != nil {
-			return err
+			return fmt.Errorf("creating web UI: %w", err)
 		}
-		// Run the HTTP server for the web UI
-		go func() {
-			if err := webUI.RunServer(ctx); err != nil {
-				klog.Fatalf("error running http server: %v", err)
-			}
-		}()
-		userInterface = webUI
-
 	case ui.UITypeTUI:
 		userInterface = ui.NewTUI(k8sAgent)
-
 	default:
 		return fmt.Errorf("user-interface mode %q is not known", opt.UIType)
 	}
@@ -461,7 +454,7 @@ func repl(ctx context.Context, initialQuery string, ui ui.UI, agent *agent.Agent
 	}
 
 	err = ui.Run(ctx)
-	if err != nil {
+	if err != nil && !errors.Is(err, context.Canceled) {
 		return fmt.Errorf("running UI: %w", err)
 	}
 

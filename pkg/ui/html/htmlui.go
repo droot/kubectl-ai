@@ -25,12 +25,14 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/agent"
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/api"
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/journal"
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/ui"
 	"github.com/charmbracelet/glamour"
+	"golang.org/x/sync/errgroup"
 	"k8s.io/klog/v2"
 )
 
@@ -143,42 +145,56 @@ func NewHTMLUserInterface(agent *agent.Agent, listenAddress string, journal jour
 }
 
 func (u *HTMLUserInterface) Run(ctx context.Context) error {
+	g, gctx := errgroup.WithContext(ctx)
+
 	// Start the broadcaster
-	go u.broadcaster.Run(ctx)
+	g.Go(func() error {
+		u.broadcaster.Run(gctx)
+		return nil
+	})
 
 	// This goroutine listens to agent output and broadcasts it.
-	go func() {
+	g.Go(func() error {
 		for {
 			select {
-			case <-ctx.Done():
-				return
+			case <-gctx.Done():
+				return nil
 			case _, ok := <-u.agent.Output:
 				if !ok {
-					return // Channel closed
+					return nil // Channel closed
 				}
 				// We received a message from the agent. It's a signal that
 				// the state has changed. We fetch the entire current state and
 				// broadcast it to all connected clients.
 				jsonData, err := u.getCurrentStateJSON()
 				if err != nil {
+					// Don't return an error, just log it and continue
 					klog.Errorf("Error marshaling state for broadcast: %v", err)
 					continue
 				}
 				u.broadcaster.Broadcast(jsonData)
 			}
 		}
-	}()
+	})
 
-	<-ctx.Done()
-	return nil
-}
+	g.Go(func() error {
+		if err := u.httpServer.Serve(u.httpServerListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("error running http server: %w", err)
+		}
+		return nil
+	})
 
-func (u *HTMLUserInterface) RunServer(ctx context.Context) error {
-	go func() {
-		<-ctx.Done()
-		u.httpServerListener.Close()
-	}()
-	return u.httpServer.Serve(u.httpServerListener)
+	g.Go(func() error {
+		<-gctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := u.httpServer.Shutdown(shutdownCtx); err != nil {
+			klog.Errorf("HTTP server shutdown error: %v", err)
+		}
+		return nil
+	})
+
+	return g.Wait()
 }
 
 //go:embed index.html

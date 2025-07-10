@@ -18,6 +18,7 @@ require (
 	github.com/mark3labs/mcp-go v0.31.0
 	github.com/spf13/cobra v1.9.1
 	github.com/spf13/pflag v1.0.6
+	golang.org/x/sync v0.13.0
 	golang.org/x/term v0.31.0
 	k8s.io/klog/v2 v2.130.1
 	mvdan.cc/sh/v3 v3.11.0
@@ -88,7 +89,6 @@ require (
 	go.opentelemetry.io/otel/trace v1.34.0 // indirect
 	golang.org/x/crypto v0.36.0 // indirect
 	golang.org/x/net v0.38.0 // indirect
-	golang.org/x/sync v0.13.0 // indirect
 	golang.org/x/sys v0.32.0 // indirect
 	golang.org/x/text v0.24.0 // indirect
 	google.golang.org/genai v1.8.0 // indirect
