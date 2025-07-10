@@ -25,7 +25,32 @@ if [[ -z "${DOCKER:-}" ]]; then
 fi
 echo "Using container tool: ${DOCKER}"
 
-${DOCKER} buildx build ${BUILDX_ARGS} \
-    -f images/kubectl-ai/Dockerfile \
-    -t ${IMAGE_PREFIX}kubectl-ai:${TAG} \
-    --progress=plain .
+if [[ "${DOCKER}" == "podman" ]]; then
+  # Podman doesn't support buildx, use regular build command
+  if [[ "${BUILDX_ARGS}" == "--push" ]]; then
+    # For podman, build and then push separately
+    echo "Building with podman..."
+    ${DOCKER} build \
+        --platform linux/amd64 \
+        -f images/kubectl-ai/Dockerfile \
+        -t ${IMAGE_PREFIX}kubectl-ai:${TAG} \
+        .
+    echo "Pushing with podman..."
+    ${DOCKER} push ${IMAGE_PREFIX}kubectl-ai:${TAG}
+  else
+    # For --load or other args, just build
+    ${DOCKER} build \
+        --platform linux/amd64 \
+        -f images/kubectl-ai/Dockerfile \
+        -t ${IMAGE_PREFIX}kubectl-ai:${TAG} \
+        .
+  fi
+else
+  # Use docker buildx for docker
+  # Specify platform to avoid multi-arch build requirements
+  ${DOCKER} buildx build ${BUILDX_ARGS} \
+      --platform linux/amd64 \
+      -f images/kubectl-ai/Dockerfile \
+      -t ${IMAGE_PREFIX}kubectl-ai:${TAG} \
+      --progress=plain .
+fi

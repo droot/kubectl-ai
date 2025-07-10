@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+SRC_DIR=${REPO_ROOT}
+cd "${SRC_DIR}"
+
+# Get GCP project ID
+if [[ -z "${GCP_PROJECT_ID:-}" ]]; then
+  GCP_PROJECT_ID=$(gcloud config get project)
+fi
+echo "Using GCP_PROJECT_ID=${GCP_PROJECT_ID}"
+
+# Build kubectl command args based on available configuration
+KUBECTL_ARGS=""
+
+if [[ -n "${KUBECONFIG:-}" ]]; then
+  echo "Using KUBECONFIG: ${KUBECONFIG}"
+else
+  echo "Using default kubeconfig (~/.kube/config)"
+fi
+
+if [[ -n "${KUBE_CONTEXT:-}" ]]; then
+  KUBECTL_ARGS="--context=${KUBE_CONTEXT}"
+  echo "Using kube context: ${KUBE_CONTEXT}"
+elif [[ -z "${KUBECONFIG:-}" ]]; then
+  # Only require KUBE_CONTEXT if KUBECONFIG is not specified
+  echo "Listing GKE clusters in project ${GCP_PROJECT_ID}:"
+  gcloud container clusters list --project=${GCP_PROJECT_ID}
+  echo ""
+  echo "Please set KUBE_CONTEXT to kubectl context to use, or set KUBECONFIG to use a specific kubeconfig file"
+  exit 1
+else
+  echo "Using current context from KUBECONFIG"
+fi
+
+if [[ -z "${NAMESPACE:-}" ]]; then
+  NAMESPACE=kubectl-ai
+  echo "Defaulting to namespace: ${NAMESPACE}"
+fi
+
+# Pick a probably-unique tag
+export TAG=`date +%Y%m%d%H%M%S`
+
+# Set up image registry - default to GCR, but allow override
+if [[ -z "${IMAGE_REGISTRY:-}" ]]; then
+  IMAGE_REGISTRY=gcr.io/${GCP_PROJECT_ID}
+fi
+echo "Using image registry: ${IMAGE_REGISTRY}"
+
+# Configure authentication for the container registry before building
+echo "Configuring authentication for ${IMAGE_REGISTRY}"
+if [[ "${IMAGE_REGISTRY}" == gcr.io/* ]]; then
+  # Configure GCR authentication
+  gcloud auth configure-docker --quiet
+elif [[ "${IMAGE_REGISTRY}" == *-docker.pkg.dev/* ]]; then
+  # Configure Artifact Registry authentication
+  gcloud auth configure-docker ${IMAGE_REGISTRY%%/*} --quiet
+fi
+
+# Configure podman authentication before building if needed
+if [[ "${DOCKER:-docker}" == "podman" ]]; then
+  echo "Using podman: configuring registry authentication"
+  # For podman, we need to configure the auth helper
+  if [[ "${IMAGE_REGISTRY}" == gcr.io/* ]]; then
+    echo "$(gcloud auth print-access-token)" | podman login -u oauth2accesstoken --password-stdin gcr.io
+  elif [[ "${IMAGE_REGISTRY}" == *-docker.pkg.dev/* ]]; then
+    echo "$(gcloud auth print-access-token)" | podman login -u oauth2accesstoken --password-stdin ${IMAGE_REGISTRY%%/*}
+  fi
+fi
+
+# Build the image
+echo "Building images"
+export IMAGE_PREFIX=${IMAGE_REGISTRY}/
+if [[ -n "${DOCKER:-}" ]]; then
+  echo "Using container tool: ${DOCKER}"
+  export DOCKER
+fi
+
+# For GKE, we need to push images, so use --push instead of --load
+BUILDX_ARGS=--push dev/tasks/build-images
+
+KUBECTL_AI_IMAGE="${IMAGE_PREFIX}kubectl-ai:${TAG}"
+
+echo "Built and pushed image: ${KUBECTL_AI_IMAGE}"
+
+# Create the namespace if it doesn't exist
+echo "Creating namespace: ${NAMESPACE}"
+kubectl create namespace ${NAMESPACE} ${KUBECTL_ARGS} --dry-run=client -oyaml | kubectl apply ${KUBECTL_ARGS} --server-side -f -
+
+# Note: No secret needed for Vertex AI - uses Workload Identity for authentication
+
+# Create a cluster role binding so kubectl can "see" the current cluster
+# For production GKE, consider using more restrictive permissions
+echo "Creating cluster role binding as view"
+cat <<EOF | kubectl apply ${KUBECTL_ARGS} --namespace=${NAMESPACE} --server-side -f -
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ${NAMESPACE}:kubectl-ai:view
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view
+subjects:
+- kind: ServiceAccount
+  name: kubectl-ai
+  namespace: ${NAMESPACE}
+EOF
+
+# Deploy manifests
+echo "Deploying manifests"
+cat k8s/kubectl-ai-gke.yaml | \
+  sed s@kubectl-ai:latest@${KUBECTL_AI_IMAGE}@g | \
+  sed s@PROJECT_ID@${GCP_PROJECT_ID}@g | \
+  kubectl apply ${KUBECTL_ARGS} --namespace=${NAMESPACE} --server-side -f -
+
+echo ""
+echo "Deployment completed successfully!"
+echo "Image: ${KUBECTL_AI_IMAGE}"
+echo "Namespace: ${NAMESPACE}"
+echo ""
+echo "Using GKE Workload Identity Federation for Vertex AI access."
+echo "Make sure your GKE cluster has Workload Identity enabled and configured for Vertex AI."
+echo ""
+echo "To access the service:"
+echo "  kubectl port-forward ${KUBECTL_ARGS} -n ${NAMESPACE} service/kubectl-ai 8080:80"
+echo "  Then open http://localhost:8080 in your browser" 
