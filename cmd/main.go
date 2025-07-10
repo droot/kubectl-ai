@@ -220,10 +220,12 @@ func main() {
 		}
 		// Exit with non-zero status code on error, unless it's a graceful shutdown.
 		if errors.Is(err, context.Canceled) {
+			fmt.Fprintln(os.Stderr, "\nGoodbye!")
 			os.Exit(0)
 		}
 		os.Exit(1)
 	}
+	fmt.Fprintln(os.Stderr, "Goodbye!")
 }
 
 func run(ctx context.Context) error {

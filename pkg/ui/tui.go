@@ -247,8 +247,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.GotoBottom()
 	case tea.KeyMsg:
 		switch msg.Type {
-		case tea.KeyCtrlC, tea.KeyEsc:
-			fmt.Println(m.textarea.Value())
+		case tea.KeyCtrlC, tea.KeyEsc, tea.KeyCtrlD:
 			return m, tea.Quit
 		case tea.KeyEnter:
 			if m.agent.Session().AgentState == api.AgentStateWaitingForInput {

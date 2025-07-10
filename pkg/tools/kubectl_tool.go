@@ -134,7 +134,7 @@ func runKubectlCommand(ctx context.Context, command, workDir, kubeconfig string)
 		cmd.Env = append(cmd.Env, "KUBECONFIG="+kubeconfig)
 	}
 
-	return executeCommand(cmd)
+	return executeCommand(ctx, cmd)
 }
 
 func (t *Kubectl) IsInteractive(args map[string]any) (bool, error) {

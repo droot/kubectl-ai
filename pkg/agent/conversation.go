@@ -24,6 +24,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/kubectl-ai/gollm"
@@ -102,6 +103,9 @@ type Agent struct {
 	// this is used by the UI to track the state of the agent and the conversation
 	session *api.Session
 
+	// protects session from concurrent access
+	sessionMu sync.Mutex
+
 	// cached list of available models
 	availableModels []string
 
@@ -110,11 +114,21 @@ type Agent struct {
 }
 
 func (s *Agent) Session() *api.Session {
-	return s.session
+	s.sessionMu.Lock()
+	defer s.sessionMu.Unlock()
+
+	// Create a shallow copy of the session struct. The Messages slice header
+	// is also copied, providing the caller with a snapshot of the messages
+	// at this point in time. The UI should treat the messages as read-only
+	// to avoid race conditions.
+	sessionCopy := *s.session
+	return &sessionCopy
 }
 
 // addMessage creates a new message, adds it to the session, and sends it to the output channel
 func (c *Agent) addMessage(source api.MessageSource, messageType api.MessageType, payload any) *api.Message {
+	c.sessionMu.Lock()
+	defer c.sessionMu.Unlock()
 	message := &api.Message{
 		ID:        uuid.New().String(),
 		Source:    source,
@@ -130,14 +144,25 @@ func (c *Agent) addMessage(source api.MessageSource, messageType api.MessageType
 
 // setAgentState updates the agent state and ensures LastModified is updated
 func (c *Agent) setAgentState(newState api.AgentState) {
-	if c.AgentState() != newState {
-		klog.Infof("Agent state changing from %s to %s", c.AgentState(), newState)
+	c.sessionMu.Lock()
+	defer c.sessionMu.Unlock()
+	currentState := c.agentState()
+	if currentState != newState {
+		klog.Infof("Agent state changing from %s to %s", currentState, newState)
 		c.session.AgentState = newState
 		c.session.LastModified = time.Now()
 	}
 }
 
 func (c *Agent) AgentState() api.AgentState {
+	c.sessionMu.Lock()
+	defer c.sessionMu.Unlock()
+	return c.agentState()
+}
+
+// agentState returns the agent state without locking.
+// The caller is responsible for locking.
+func (c *Agent) agentState() api.AgentState {
 	return c.session.AgentState
 }
 
@@ -290,6 +315,7 @@ func (c *Agent) Run(ctx context.Context, initialQuery string) error {
 					log.Info("Received input from channel", "userInput", userInput)
 					if userInput == io.EOF {
 						log.Info("Agent loop done, EOF received")
+						c.setAgentState(api.AgentStateExited)
 						return
 					}
 					query, ok := userInput.(*api.UserInputResponse)
@@ -337,6 +363,7 @@ func (c *Agent) Run(ctx context.Context, initialQuery string) error {
 				case userInput = <-c.Input:
 					if userInput == io.EOF {
 						log.Info("Agent loop done, EOF received")
+						c.setAgentState(api.AgentStateExited)
 						return
 					}
 					choiceResponse, ok := userInput.(*api.UserChoiceResponse)
@@ -594,7 +621,9 @@ func (c *Agent) Run(ctx context.Context, initialQuery string) error {
 func (c *Agent) handleMetaQuery(ctx context.Context, query string) (answer string, handled bool, err error) {
 	switch query {
 	case "clear", "reset":
+		c.sessionMu.Lock()
 		c.session.Messages = []*api.Message{}
+		c.sessionMu.Unlock()
 		return "Cleared the conversation.", true, nil
 	case "model":
 		return "Current model is `" + c.Model + "`", true, nil

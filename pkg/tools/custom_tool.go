@@ -142,7 +142,7 @@ func (t *CustomTool) Run(ctx context.Context, args map[string]any) (any, error) 
 	cmd.Dir = workDir
 	cmd.Env = os.Environ()
 
-	return executeCommand(cmd)
+	return executeCommand(ctx, cmd)
 }
 
 // CheckModifiesResource determines if the command modifies resources

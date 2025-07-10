@@ -72,6 +72,8 @@ func (a *Agent) UpdateMCPStatus(ctx context.Context, mcpClientEnabled bool) erro
 	}
 
 	// Update the session with MCP status
+	a.sessionMu.Lock()
+	defer a.sessionMu.Unlock()
 	a.session.MCPStatus = status
 
 	return nil
@@ -141,6 +143,8 @@ func (a *Agent) convertMCPStatus(mcpStatus *mcp.MCPStatus) *api.MCPStatus {
 // GetMCPStatusText returns a formatted text representation of the MCP status
 // This can be used by UIs that want to display the status as text
 func (a *Agent) GetMCPStatusText() string {
+	a.sessionMu.Lock()
+	defer a.sessionMu.Unlock()
 	if a.session.MCPStatus == nil {
 		return ""
 	}
