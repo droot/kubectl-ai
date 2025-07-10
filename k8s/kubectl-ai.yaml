@@ -17,7 +17,7 @@ spec:
       - name: kubectl-ai
         image: kubectl-ai:latest
         args:
-        - --user-interface=html
+        - --ui-type=web
         envFrom:
         - secretRef:
             name: kubectl-ai

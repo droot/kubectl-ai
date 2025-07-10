@@ -11,8 +11,22 @@ cd "${SRC_DIR}"
 # Pick a probably-unique tag
 export TAG=`date +%Y%m%d%H%M%S`
 
-if [[ -z "${KUBE_CONTEXT:-}" ]]; then
+# Build kubectl command args based on available configuration
+KUBECTL_ARGS=""
+
+if [[ -n "${KUBECONFIG:-}" ]]; then
+  echo "Using KUBECONFIG: ${KUBECONFIG}"
+else
+  echo "Using default kubeconfig (~/.kube/config)"
+fi
+
+if [[ -n "${KUBE_CONTEXT:-}" ]]; then
+  KUBECTL_ARGS="--context=${KUBE_CONTEXT}"
+  echo "Using kube context: ${KUBE_CONTEXT}"
+elif [[ -z "${KUBECONFIG:-}" ]]; then
+  # Only set default context if KUBECONFIG is not specified
   KUBE_CONTEXT=kind-kind
+  KUBECTL_ARGS="--context=${KUBE_CONTEXT}"
   echo "Defaulting to kube context: ${KUBE_CONTEXT}"
 fi
 
@@ -24,23 +38,53 @@ fi
 # Build the image
 echo "Building images"
 export IMAGE_PREFIX=fake.registry/
+if [[ -n "${DOCKER:-}" ]]; then
+  echo "Using container tool: ${DOCKER}"
+  export DOCKER
+fi
 BUILDX_ARGS=--load dev/tasks/build-images
 
 KUBECTL_AI_IMAGE="${IMAGE_PREFIX:-}kubectl-ai:${TAG}"
 
+# Determine the kind cluster name
+KIND_CLUSTER_NAME=""
+if [[ -n "${KUBE_CONTEXT:-}" ]] && [[ "${KUBE_CONTEXT}" == kind-* ]]; then
+  # Extract cluster name from context (kind-clustername -> clustername)
+  KIND_CLUSTER_NAME="${KUBE_CONTEXT#kind-}"
+else
+  # Try to find any available kind cluster
+  AVAILABLE_CLUSTERS=$(kind get clusters 2>/dev/null || echo "")
+  if [[ -n "${AVAILABLE_CLUSTERS}" ]]; then
+    KIND_CLUSTER_NAME=$(echo "${AVAILABLE_CLUSTERS}" | head -n1)
+    echo "Auto-detected kind cluster: ${KIND_CLUSTER_NAME}"
+  else
+    echo "ERROR: No kind clusters found. Please create one with 'kind create cluster'"
+    exit 1
+  fi
+fi
+
 # Load the image into kind
-echo "Loading images into kind: ${KUBECTL_AI_IMAGE}"
-kind load docker-image ${KUBECTL_AI_IMAGE}
+echo "Loading images into kind cluster '${KIND_CLUSTER_NAME}': ${KUBECTL_AI_IMAGE}"
+if [[ "${DOCKER:-docker}" == "podman" ]]; then
+  # For podman, we need to save and load the image via archive
+  echo "Using podman: saving image to archive first"
+  podman save ${KUBECTL_AI_IMAGE} -o /tmp/kubectl-ai-image.tar
+  kind load image-archive /tmp/kubectl-ai-image.tar --name ${KIND_CLUSTER_NAME}
+  rm -f /tmp/kubectl-ai-image.tar
+else
+  # For docker, use the standard approach
+  kind load docker-image ${KUBECTL_AI_IMAGE} --name ${KIND_CLUSTER_NAME}
+fi
 
 # Create the namespace if it doesn't exist
 echo "Creating namespace: ${NAMESPACE}"
-kubectl create namespace ${NAMESPACE} --context=${KUBE_CONTEXT} --dry-run=client -oyaml | kubectl apply --context=${KUBE_CONTEXT} --server-side -f -
+kubectl create namespace ${NAMESPACE} ${KUBECTL_ARGS} --dry-run=client -oyaml | kubectl apply ${KUBECTL_ARGS} --server-side -f -
 
 # Create the secret if it doesn't exist,
 # including the GEMINI_API_KEY environment variable if set.
 # (This is for kind, on a GKE cluster, we probably want to use Workload Identity instead)
 echo "Creating secret: kubectl-ai"
-cat <<EOF | kubectl apply --context=${KUBE_CONTEXT} --namespace=${NAMESPACE} --server-side -f -
+cat <<EOF | kubectl apply ${KUBECTL_ARGS} --namespace=${NAMESPACE} --server-side -f -
 kind: Secret
 apiVersion: v1
 metadata:
@@ -56,7 +100,7 @@ EOF
 # Create a role binding so kubectl can "see" the current cluster
 # Again, this makes sense for kind but we will probably have a different approach for GKE
 echo "Creating cluster role binding as view"
-cat <<EOF | kubectl apply --context=${KUBE_CONTEXT} --namespace=${NAMESPACE} --server-side -f -
+cat <<EOF | kubectl apply ${KUBECTL_ARGS} --namespace=${NAMESPACE} --server-side -f -
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
@@ -74,4 +118,4 @@ EOF
 # Deploy manifests
 echo "Deploying manifests"
 cat k8s/kubectl-ai.yaml | sed s@kubectl-ai:latest@${KUBECTL_AI_IMAGE}@g | \
-  kubectl apply --context=${KUBE_CONTEXT} --namespace=${NAMESPACE} --server-side -f -
+  kubectl apply ${KUBECTL_ARGS} --namespace=${NAMESPACE} --server-side -f -

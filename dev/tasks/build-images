@@ -20,8 +20,12 @@ fi
 if [[ -z "${BUILDX_ARGS:-}" ]]; then
   BUILDX_ARGS="--load"
 fi
+if [[ -z "${DOCKER:-}" ]]; then
+  DOCKER="docker"
+fi
+echo "Using container tool: ${DOCKER}"
 
-docker buildx build ${BUILDX_ARGS} \
+${DOCKER} buildx build ${BUILDX_ARGS} \
     -f images/kubectl-ai/Dockerfile \
     -t ${IMAGE_PREFIX}kubectl-ai:${TAG} \
     --progress=plain .
