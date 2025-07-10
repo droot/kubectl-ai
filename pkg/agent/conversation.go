@@ -247,13 +247,13 @@ func (c *Agent) Run(ctx context.Context, initialQuery string) error {
 	go func() {
 		if initialQuery != "" {
 			c.addMessage(api.MessageSourceUser, api.MessageTypeText, initialQuery)
-			answer, err := c.handleMetaQuery(ctx, initialQuery)
+			answer, handled, err := c.handleMetaQuery(ctx, initialQuery)
 			if err != nil {
 				log.Error(err, "error handling meta query")
 				c.setAgentState(api.AgentStateDone)
 				c.pendingFunctionCalls = []ToolCallAnalysis{}
 				c.addMessage(api.MessageSourceAgent, api.MessageTypeError, "Error: "+err.Error())
-			} else if answer != "" {
+			} else if handled {
 				// we handled the meta query, so we don't need to run the agentic loop
 				c.setAgentState(api.AgentStateDone)
 				c.pendingFunctionCalls = []ToolCallAnalysis{}
@@ -300,7 +300,7 @@ func (c *Agent) Run(ctx context.Context, initialQuery string) error {
 					c.addMessage(api.MessageSourceUser, api.MessageTypeText, query.Query)
 					// we don't need the agentic loop for meta queries
 					// for ex. model, tools, etc.
-					answer, err := c.handleMetaQuery(ctx, query.Query)
+					answer, handled, err := c.handleMetaQuery(ctx, query.Query)
 					if err != nil {
 						log.Error(err, "error handling meta query")
 						c.setAgentState(api.AgentStateDone)
@@ -308,7 +308,7 @@ func (c *Agent) Run(ctx context.Context, initialQuery string) error {
 						c.addMessage(api.MessageSourceAgent, api.MessageTypeError, "Error: "+err.Error())
 						continue
 					}
-					if answer != "" {
+					if handled {
 						// we handled the meta query, so we don't need to run the agentic loop
 						c.setAgentState(api.AgentStateDone)
 						c.pendingFunctionCalls = []ToolCallAnalysis{}
@@ -591,24 +591,24 @@ func (c *Agent) Run(ctx context.Context, initialQuery string) error {
 	return nil
 }
 
-func (c *Agent) handleMetaQuery(ctx context.Context, query string) (answer string, err error) {
+func (c *Agent) handleMetaQuery(ctx context.Context, query string) (answer string, handled bool, err error) {
 	switch query {
 	case "clear", "reset":
 		c.session.Messages = []*api.Message{}
-		return "Cleared the conversation.", nil
+		return "Cleared the conversation.", true, nil
 	case "model":
-		return "Current model is `" + c.Model + "`", nil
+		return "Current model is `" + c.Model + "`", true, nil
 	case "models":
 		models, err := c.listModels(ctx)
 		if err != nil {
-			return "", fmt.Errorf("listing models: %w", err)
+			return "", false, fmt.Errorf("listing models: %w", err)
 		}
-		return "Available models:\n\n  - " + strings.Join(models, "\n  - ") + "\n\n", nil
+		return "Available models:\n\n  - " + strings.Join(models, "\n  - ") + "\n\n", true, nil
 	case "tools":
-		return "Available tools:\n\n  - " + strings.Join(c.Tools.Names(), "\n  - ") + "\n\n", nil
+		return "Available tools:\n\n  - " + strings.Join(c.Tools.Names(), "\n  - ") + "\n\n", true, nil
 	}
 
-	return "", nil
+	return "", false, nil
 }
 
 func (c *Agent) listModels(ctx context.Context) ([]string, error) {
