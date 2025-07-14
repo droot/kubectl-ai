@@ -30,12 +30,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 COPY --from=builder /src/kubectl-ai /bin/kubectl-ai
 COPY --from=kubectl-tool /opt/tools/kubectl/ /opt/tools/kubectl/
+COPY --from=kubectl-tool /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
 RUN ln -sf /opt/tools/kubectl/bin/kubectl /bin/kubectl
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
 
 ENTRYPOINT [ "/bin/kubectl-ai" ]
