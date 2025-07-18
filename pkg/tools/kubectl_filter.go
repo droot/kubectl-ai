@@ -36,7 +36,7 @@ var (
 	writeOps = map[string]bool{
 		"create": true, "apply": true, "edit": true, "delete": true,
 		"patch": true, "replace": true, "scale": true, "autoscale": true,
-		"expose": true, "run": true, "set": true,
+		"expose": true, "run": true, "exec": true, "set": true,
 		"label": true, "annotate": true, "taint": true, "drain": true,
 		"cordon": true, "uncordon": true, "debug": true, "attach": true,
 		"cp": true, "reconcile": true, "approve": true, "deny": true,
