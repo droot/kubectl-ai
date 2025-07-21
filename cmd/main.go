@@ -340,8 +340,9 @@ func (opt *Options) bindCLIFlags(f *pflag.FlagSet) error {
 }
 
 func RunRootCommand(ctx context.Context, opt Options, args []string) error {
-	var err error             // Declare err once for the whole function
-	var k8sAgent *agent.Agent // Declare agent at function scope for cleanup
+	var err error                        // Declare err once for the whole function
+	var k8sAgent *agent.Agent            // default agent for terminal/tui modes
+	var sessionMgr *agent.SessionManager // used for web mode
 
 	// Validate flag combinations
 	if opt.ExternalTools && !opt.MCPServer {
@@ -455,18 +456,71 @@ func RunRootCommand(ctx context.Context, opt Options, args []string) error {
 		if err != nil {
 			return fmt.Errorf("creating terminal UI: %w", err)
 		}
+		return repl(ctx, queryFromCmd, userInterface, k8sAgent)
+
+	case ui.UITypeTUI:
+		userInterface = ui.NewTUI(k8sAgent)
+		return repl(ctx, queryFromCmd, userInterface, k8sAgent)
+
 	case ui.UITypeWeb:
-		userInterface, err = html.NewHTMLUserInterface(k8sAgent, opt.UIListenAddress, recorder)
+		// Build factory for new agents
+		factory := func() *agent.Agent {
+			return &agent.Agent{
+				Model:              opt.ModelID,
+				Kubeconfig:         opt.KubeConfigPath,
+				LLM:                llmClient,
+				MaxIterations:      opt.MaxIterations,
+				PromptTemplateFile: opt.PromptTemplateFilePath,
+				ExtraPromptPaths:   opt.ExtraPromptPaths,
+				Tools:              tools.Default(),
+				Recorder:           recorder,
+				RemoveWorkDir:      opt.RemoveWorkDir,
+				SkipPermissions:    opt.SkipPermissions,
+				EnableToolUseShim:  opt.EnableToolUseShim,
+				MCPClientEnabled:   opt.MCPClient,
+				UseSandbox:         opt.UseSandbox,
+				SandboxImage:       opt.SandboxImage,
+			}
+		}
+
+		sessionMgr = agent.NewSessionManager(factory)
+
+		// Create a default session so the UI has something to display.
+		defaultAgent, err := sessionMgr.CreateSession(ctx)
+		if err != nil {
+			return fmt.Errorf("creating default session: %w", err)
+		}
+
+		// Register cleanup for all sessions (sandbox cleanup etc.)
+		registerCleanup(func() {
+			klog.Info("Signal-based cleanup: Closing all sessions")
+			sessionMgr.Close()
+		})
+
+		// Ensure we also cleanup on normal exit path
+		defer sessionMgr.Close()
+
+		// Run the default agent in background.
+		go func() {
+			if err := defaultAgent.Run(ctx, ""); err != nil && !errors.Is(err, context.Canceled) {
+				klog.Errorf("default agent run error: %v", err)
+			}
+		}()
+
+		userInterface, err = html.NewHTMLUserInterface(sessionMgr, opt.UIListenAddress, recorder)
 		if err != nil {
 			return fmt.Errorf("creating web UI: %w", err)
 		}
-	case ui.UITypeTUI:
-		userInterface = ui.NewTUI(k8sAgent)
+
+		// Run the web UI (blocks until ctx cancelled)
+		if err := userInterface.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			return fmt.Errorf("running UI: %w", err)
+		}
+		return nil
+
 	default:
 		return fmt.Errorf("user-interface mode %q is not known", opt.UIType)
 	}
-
-	return repl(ctx, queryFromCmd, userInterface, k8sAgent)
 }
 
 func handleCustomTools(toolConfigPaths []string) error {

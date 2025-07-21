@@ -261,7 +261,16 @@
     <script type="text/babel">
         const { useState, useEffect, useRef } = React;
 
+        // Helper to fetch JSON with minimal boilerplate
+        async function fetchJSON(url, opts = {}) {
+            const res = await fetch(url, opts);
+            if (!res.ok) throw new Error(await res.text());
+            return res.json();
+        }
+
         function App() {
+            const [sessions, setSessions] = useState([]); // list of session metadata
+            const [currentSessionId, setCurrentSessionId] = useState(null);
             const [messages, setMessages] = useState([]);
             const [input, setInput] = useState('');
             const [agentState, setAgentState] = useState('idle');
@@ -284,6 +293,14 @@
             });
             const messagesEndRef = useRef(null);
             const inputRef = useRef(null);
+
+            const scrollToBottom = () => {
+                messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+            };
+
+            useEffect(() => {
+                scrollToBottom();
+            }, [messages]);
 
             const toggleOutput = (messageIndex) => {
                 const newExpanded = new Set(expandedOutputs);
@@ -331,16 +348,28 @@
                 };
             }, []);
 
-            const scrollToBottom = () => {
-                messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-            };
-
+            // Load session list on mount
             useEffect(() => {
-                scrollToBottom();
-            }, [messages]);
+                fetchSessions();
+            }, []);
 
+            async function fetchSessions() {
+                try {
+                    const data = await fetchJSON('/sessions');
+                    setSessions(data);
+                    if (!currentSessionId && data.length > 0) {
+                        setCurrentSessionId(data[0].ID);
+                    }
+                } catch (err) {
+                    console.error('Error fetching sessions', err);
+                }
+            }
+
+            // SSE connection handling per-session
             useEffect(() => {
-                const eventSource = new EventSource('/messages-stream');
+                if (!currentSessionId) return;
+
+                const eventSource = new EventSource(`/sessions/${currentSessionId}/stream`);
                 
                 eventSource.onopen = () => {
                     setIsConnected(true);
@@ -365,7 +394,7 @@
                 return () => {
                     eventSource.close();
                 };
-            }, []);
+            }, [currentSessionId]);
 
             useEffect(() => {
                 const canSendMessage = agentState === 'idle' || agentState === 'done' || agentState === 'waiting-for-input';
@@ -381,7 +410,7 @@
                 if (!message.trim()) return;
 
                 try {
-                    const response = await fetch('/send-message', {
+                    const response = await fetch(`/sessions/${currentSessionId}/send-message`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                         body: 'q=' + encodeURIComponent(message)
@@ -397,7 +426,7 @@
 
             const chooseOption = async (optionIndex) => {
                 try {
-                    await fetch('/choose-option', {
+                    await fetch(`/sessions/${currentSessionId}/choose-option`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                         body: 'choice=' + encodeURIComponent(optionIndex)
@@ -722,132 +751,162 @@
 
             const statusInfo = getAgentStatusInfo();
 
+            const createNewSession = async () => {
+                try {
+                    const data = await fetchJSON('/sessions', { method: 'POST' });
+                    await fetchSessions(); // refresh list
+                    setCurrentSessionId(data.id);
+                } catch (err) {
+                    console.error('Error creating session', err);
+                }
+            };
+
             return (
-                <div className={`flex flex-col h-screen ${isDarkMode ? 'bg-gradient-to-br from-slate-900 to-gray-900' : 'bg-gradient-to-br from-slate-50 to-blue-50'}`}>
-                    {/* Header */}
-                    <div className={`${isDarkMode ? 'bg-gray-800/80' : 'bg-white/80'} backdrop-blur-sm ${isDarkMode ? 'border-gray-700' : 'border-gray-200'} border-b px-6 py-4 shadow-sm`}>
-                        <div className="flex items-center justify-between">
-                            <div className="flex items-center space-x-3">
-                                <div className="w-8 h-8 bg-gradient-to-br from-brand-500 to-brand-600 rounded-lg flex items-center justify-center">
-                                    <span className="text-white font-bold text-sm">K8</span>
-                                </div>
-                                <div>
-                                    <h1 className={`text-xl font-bold ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>kubectl-ai</h1>
-                                    <p className={`text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>Your intelligent Kubernetes assistant</p>
-                                </div>
-                            </div>
-                            <div className="flex items-center space-x-4">
-                                <div className="flex items-center space-x-2">
-                                    <div className={"px-3 py-1 rounded-full text-xs font-medium " + statusInfo.bgColor + " " + statusInfo.color + " flex items-center space-x-1"}>
-                                        <span>{statusInfo.icon}</span>
-                                        <span>{statusInfo.text}</span>
-                                    </div>
-                                </div>
-                                <div className="flex items-center space-x-2">
-                                    <div className={"w-2 h-2 rounded-full " + (isConnected ? 'bg-emerald-500' : 'bg-red-500') + " " + (!isConnected ? 'status-pulse' : '')}></div>
-                                    <span className={`text-sm ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
-                                        {isConnected ? 'Connected' : 'Connecting...'}
-                                    </span>
-                                </div>
-                                {/* Dark Mode Toggle */}
-                                <button
-                                    onClick={toggleDarkMode}
-                                    className={`p-2 rounded-lg transition-colors duration-200 ${
-                                        isDarkMode 
-                                            ? 'bg-gray-700 hover:bg-gray-600 text-yellow-400' 
-                                            : 'bg-gray-100 hover:bg-gray-200 text-gray-600'
-                                    }`}
-                                    title={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
-                                >
-                                    {isDarkMode ? (
-                                        <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-                                            <path fillRule="evenodd" d="M10 2a1 1 0 011 1v1a1 1 0 11-2 0V3a1 1 0 011-1zm4 8a4 4 0 11-8 0 4 4 0 018 0zm-.464 4.95l.707.707a1 1 0 001.414-1.414l-.707-.707a1 1 0 00-1.414 1.414zm2.12-10.607a1 1 0 010 1.414l-.706.707a1 1 0 11-1.414-1.414l.707-.707a1 1 0 011.414 0zM17 11a1 1 0 100-2h-1a1 1 0 100 2h1zm-7 4a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1zM5.05 6.464A1 1 0 106.465 5.05l-.708-.707a1 1 0 00-1.414 1.414l.707.707zm1.414 8.486l-.707.707a1 1 0 01-1.414-1.414l.707-.707a1 1 0 011.414 1.414zM4 11a1 1 0 100-2H3a1 1 0 000 2h1z" clipRule="evenodd" />
-                                        </svg>
-                                    ) : (
-                                        <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-                                            <path d="M17.293 13.293A8 8 0 016.707 2.707a8.001 8.001 0 1010.586 10.586z" />
-                                        </svg>
-                                    )}
+                <div className={`flex h-screen ${isDarkMode ? 'bg-gradient-to-br from-slate-900 to-gray-900' : 'bg-gradient-to-br from-slate-50 to-blue-50'}`}>
+                    {/* Sidebar */}
+                    <div className={`${isDarkMode ? 'bg-gray-900/80 border-gray-800' : 'bg-white/80 border-gray-200'} backdrop-blur-sm w-64 border-r flex flex-col`}> 
+                        <div className="flex items-center justify-between px-4 py-3 border-b border-transparent">
+                            <span className={`${isDarkMode ? 'text-white' : 'text-gray-800'} font-semibold`}>Sessions</span>
+                            <button onClick={createNewSession} className="text-sm px-2 py-1 rounded bg-brand-500 hover:bg-brand-600 text-white">+ New</button>
+                        </div>
+                        <div className="flex-1 overflow-y-auto custom-scrollbar">
+                            {sessions.map((s) => (
+                                <button key={s.ID} onClick={() => setCurrentSessionId(s.ID)}
+                                    className={`w-full text-left px-4 py-2 hover:bg-brand-50 dark:hover:bg-gray-800 ${currentSessionId===s.ID ? (isDarkMode ? 'bg-gray-800' : 'bg-brand-100') : ''}`}> 
+                                    <div className={`${isDarkMode ? 'text-gray-200' : 'text-gray-800'} truncate`}>{s.ID.slice(0,8)}</div>
+                                    <div className="text-xs text-gray-500 truncate">{s.LastMessage || ''}</div>
                                 </button>
-                            </div>
+                            ))}
                         </div>
                     </div>
-                    
-                    {/* Messages Area */}
-                    <div className="flex-1 overflow-y-auto px-6 py-6 custom-scrollbar">
-                        <div className="max-w-4xl mx-auto">
-                            {messages.length === 0 ? (
-                                <div className="text-center py-16">
-                                    <div className="w-16 h-16 bg-gradient-to-br from-brand-500 to-brand-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
-                                        <span className="text-white text-2xl">🚀</span>
+
+                    {/* Main area */}
+                    <div className="flex flex-col flex-1">
+                        {/* Header */}
+                        <div className={`${isDarkMode ? 'bg-gray-800/80' : 'bg-white/80'} backdrop-blur-sm ${isDarkMode ? 'border-gray-700' : 'border-gray-200'} border-b px-6 py-4 shadow-sm`}>
+                            <div className="flex items-center justify-between">
+                                <div className="flex items-center space-x-3">
+                                    <div className="w-8 h-8 bg-gradient-to-br from-brand-500 to-brand-600 rounded-lg flex items-center justify-center">
+                                        <span className="text-white font-bold text-sm">K8</span>
                                     </div>
-                                    <h2 className={`text-2xl font-bold ${isDarkMode ? 'text-white' : 'text-gray-900'} mb-2`}>Welcome to kubectl-ai</h2>
-                                    <p className={`${isDarkMode ? 'text-gray-300' : 'text-gray-600'} mb-8 max-w-md mx-auto`}>
-                                        I'm your intelligent Kubernetes assistant. I can help you manage deployments, 
-                                        troubleshoot issues, and answer questions about your cluster.
-                                    </p>
-                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 max-w-2xl mx-auto">
-                                        <div className={`${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'} rounded-lg p-4 shadow-sm border`}>
-                                            <div className="text-2xl mb-2">⚙️</div>
-                                            <div className={`font-medium ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>Manage Resources</div>
-                                            <div className={`text-sm ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>Scale deployments, update configs</div>
-                                        </div>
-                                        <div className={`${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'} rounded-lg p-4 shadow-sm border`}>
-                                            <div className="text-2xl mb-2">🔍</div>
-                                            <div className={`font-medium ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>Debug Issues</div>
-                                            <div className={`text-sm ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>Find and fix problems quickly</div>
-                                        </div>
-                                        <div className={`${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'} rounded-lg p-4 shadow-sm border`}>
-                                            <div className="text-2xl mb-2">📊</div>
-                                            <div className={`font-medium ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>Get Insights</div>
-                                            <div className={`text-sm ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>Monitor and analyze your cluster</div>
-                                        </div>
+                                    <div>
+                                        <h1 className={`text-xl font-bold ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>kubectl-ai</h1>
+                                        <p className={`text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>Your intelligent Kubernetes assistant</p>
                                     </div>
                                 </div>
-                            ) : (
-                                <>
-                                    {messages.map((message, index) => renderMessage(message, index))}
-                                    {showTypingIndicator && <TypingIndicator />}
-                                </>
-                            )}
-                            <div ref={messagesEndRef} />
-                        </div>
-                    </div>
-                    
-                    {/* Input Area */}
-                    <div className={`${isDarkMode ? 'bg-gray-800/80' : 'bg-white/80'} backdrop-blur-sm ${isDarkMode ? 'border-gray-700' : 'border-gray-200'} border-t p-6`}>
-                        <div className="max-w-4xl mx-auto">
-                            <form onSubmit={handleSubmit} className="flex space-x-3">
-                                <div className="flex-1 relative">
-                                    <input
-                                        ref={inputRef}
-                                        type="text"
-                                        value={input}
-                                        onChange={(e) => setInput(e.target.value)}
-                                        placeholder={getInputPlaceholder()}
-                                        disabled={!canSendMessage}
-                                        className={`w-full px-4 py-3 pr-12 border rounded-xl shadow-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent transition-colors ${
+                                <div className="flex items-center space-x-4">
+                                    <div className="flex items-center space-x-2">
+                                        <div className={"px-3 py-1 rounded-full text-xs font-medium " + statusInfo.bgColor + " " + statusInfo.color + " flex items-center space-x-1"}>
+                                            <span>{statusInfo.icon}</span>
+                                            <span>{statusInfo.text}</span>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center space-x-2">
+                                        <div className={"w-2 h-2 rounded-full " + (isConnected ? 'bg-emerald-500' : 'bg-red-500') + " " + (!isConnected ? 'status-pulse' : '')}></div>
+                                        <span className={`text-sm ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
+                                            {isConnected ? 'Connected' : 'Connecting...'}
+                                        </span>
+                                    </div>
+                                    {/* Dark Mode Toggle */}
+                                    <button
+                                        onClick={toggleDarkMode}
+                                        className={`p-2 rounded-lg transition-colors duration-200 ${
                                             isDarkMode 
-                                                ? 'bg-gray-700 border-gray-600 text-white placeholder-gray-400' 
-                                                : 'bg-white border-gray-300 text-gray-900 placeholder-gray-400'
-                                        } ${!canSendMessage ? (isDarkMode ? 'bg-gray-800 text-gray-500' : 'bg-gray-50 text-gray-500') : ''}`}
-                                    />
-                                    {agentState === 'running' && (
-                                        <div className="absolute right-3 top-1/2 transform -translate-y-1/2">
-                                            <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-brand-500"></div>
-                                        </div>
-                                    )}
+                                                ? 'bg-gray-700 hover:bg-gray-600 text-yellow-400' 
+                                                : 'bg-gray-100 hover:bg-gray-200 text-gray-600'
+                                        }`}
+                                        title={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+                                    >
+                                        {isDarkMode ? (
+                                            <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                                                <path fillRule="evenodd" d="M10 2a1 1 0 011 1v1a1 1 0 11-2 0V3a1 1 0 011-1zm4 8a4 4 0 11-8 0 4 4 0 018 0zm-.464 4.95l.707.707a1 1 0 001.414-1.414l-.707-.707a1 1 0 00-1.414 1.414zm2.12-10.607a1 1 0 010 1.414l-.706.707a1 1 0 11-1.414-1.414l.707-.707a1 1 0 011.414 0zM17 11a1 1 0 100-2h-1a1 1 0 100 2h1zm-7 4a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1zM5.05 6.464A1 1 0 106.465 5.05l-.708-.707a1 1 0 00-1.414 1.414l.707.707zm1.414 8.486l-.707.707a1 1 0 01-1.414-1.414l.707-.707a1 1 0 011.414 1.414zM4 11a1 1 0 100-2H3a1 1 0 000 2h1z" clipRule="evenodd" />
+                                            </svg>
+                                        ) : (
+                                            <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                                                <path d="M17.293 13.293A8 8 0 016.707 2.707a8.001 8.001 0 1010.586 10.586z" />
+                                            </svg>
+                                        )}
+                                    </button>
                                 </div>
-                                <button
-                                    type="submit"
-                                    disabled={!canSendMessage || !input.trim()}
-                                    className="px-6 py-3 bg-gradient-to-r from-brand-500 to-brand-600 text-white rounded-xl hover:from-brand-600 hover:to-brand-700 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 font-medium shadow-sm"
-                                >
-                                    Send
-                                </button>
-                            </form>
-                            <div className={`flex items-center justify-center mt-3 text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                                <span>💡 Try: "scale nginx to 3 replicas" or "show me pod status"</span>
+                            </div>
+                        </div>
+                        
+                        {/* Messages Area */}
+                        <div className="flex-1 overflow-y-auto px-6 py-6 custom-scrollbar">
+                            <div className="max-w-4xl mx-auto">
+                                {messages.length === 0 ? (
+                                    <div className="text-center py-16">
+                                        <div className="w-16 h-16 bg-gradient-to-br from-brand-500 to-brand-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                                            <span className="text-white text-2xl">🚀</span>
+                                        </div>
+                                        <h2 className={`text-2xl font-bold ${isDarkMode ? 'text-white' : 'text-gray-900'} mb-2`}>Welcome to kubectl-ai</h2>
+                                        <p className={`${isDarkMode ? 'text-gray-300' : 'text-gray-600'} mb-8 max-w-md mx-auto`}>
+                                            I'm your intelligent Kubernetes assistant. I can help you manage deployments, 
+                                            troubleshoot issues, and answer questions about your cluster.
+                                        </p>
+                                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 max-w-2xl mx-auto">
+                                            <div className={`${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'} rounded-lg p-4 shadow-sm border`}>
+                                                <div className="text-2xl mb-2">⚙️</div>
+                                                <div className={`font-medium ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>Manage Resources</div>
+                                                <div className={`text-sm ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>Scale deployments, update configs</div>
+                                            </div>
+                                            <div className={`${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'} rounded-lg p-4 shadow-sm border`}>
+                                                <div className="text-2xl mb-2">🔍</div>
+                                                <div className={`font-medium ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>Debug Issues</div>
+                                                <div className={`text-sm ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>Find and fix problems quickly</div>
+                                            </div>
+                                            <div className={`${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'} rounded-lg p-4 shadow-sm border`}>
+                                                <div className="text-2xl mb-2">📊</div>
+                                                <div className={`font-medium ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>Get Insights</div>
+                                                <div className={`text-sm ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>Monitor and analyze your cluster</div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <>
+                                        {messages.map((message, index) => renderMessage(message, index))}
+                                        {showTypingIndicator && <TypingIndicator />}
+                                    </>
+                                )}
+                                <div ref={messagesEndRef} />
+                            </div>
+                        </div>
+                        
+                        {/* Input Area */}
+                        <div className={`${isDarkMode ? 'bg-gray-800/80' : 'bg-white/80'} backdrop-blur-sm ${isDarkMode ? 'border-gray-700' : 'border-gray-200'} border-t p-6`}>
+                            <div className="max-w-4xl mx-auto">
+                                <form onSubmit={handleSubmit} className="flex space-x-3">
+                                    <div className="flex-1 relative">
+                                        <input
+                                            ref={inputRef}
+                                            type="text"
+                                            value={input}
+                                            onChange={(e) => setInput(e.target.value)}
+                                            placeholder={getInputPlaceholder()}
+                                            disabled={!canSendMessage}
+                                            className={`w-full px-4 py-3 pr-12 border rounded-xl shadow-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent transition-colors ${
+                                                isDarkMode 
+                                                    ? 'bg-gray-700 border-gray-600 text-white placeholder-gray-400' 
+                                                    : 'bg-white border-gray-300 text-gray-900 placeholder-gray-400'
+                                            } ${!canSendMessage ? (isDarkMode ? 'bg-gray-800 text-gray-500' : 'bg-gray-50 text-gray-500') : ''}`}
+                                        />
+                                        {agentState === 'running' && (
+                                            <div className="absolute right-3 top-1/2 transform -translate-y-1/2">
+                                                <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-brand-500"></div>
+                                            </div>
+                                        )}
+                                    </div>
+                                    <button
+                                        type="submit"
+                                        disabled={!canSendMessage || !input.trim()}
+                                        className="px-6 py-3 bg-gradient-to-r from-brand-500 to-brand-600 text-white rounded-xl hover:from-brand-600 hover:to-brand-700 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 font-medium shadow-sm"
+                                    >
+                                        Send
+                                    </button>
+                                </form>
+                                <div className={`flex items-center justify-center mt-3 text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                                    <span>💡 Try: "scale nginx to 3 replicas" or "show me pod status"</span>
+                                </div>
                             </div>
                         </div>
                     </div>
