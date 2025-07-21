@@ -111,6 +111,12 @@ type MCPTool struct {
 	Server      string `json:"server,omitempty"`
 }
 
+// PromptGroup represents a group of canned prompts for the UI prompt library.
+type PromptGroup struct {
+	Group string   `json:"group" yaml:"group"`
+	Items []string `json:"items" yaml:"items"`
+}
+
 func (s *Session) AllMessages() []*Message {
 	return s.Messages
 }

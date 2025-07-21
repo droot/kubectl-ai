@@ -276,6 +276,8 @@
             const [agentState, setAgentState] = useState('idle');
             const [isConnected, setIsConnected] = useState(false);
             const [expandedOutputs, setExpandedOutputs] = useState(new Set());
+            const [showDrawer, setShowDrawer] = useState(false);
+            const [promptGroups, setPromptGroups] = useState([]);
             const [isDarkMode, setIsDarkMode] = useState(() => {
                 // Check for saved preference first
                 const saved = localStorage.getItem('kubectl-ai-dark-mode');
@@ -359,7 +361,7 @@
 
             async function fetchSessions() {
                 try {
-                    const data = await fetchJSON('/sessions');
+                    const data = await fetchJSON('/api/sessions');
                     setSessions(data);
                     if (sessionFromURL && data.some(s=>s.ID===sessionFromURL)) {
                         setCurrentSessionId(sessionFromURL);
@@ -375,7 +377,7 @@
             useEffect(() => {
                 if (!currentSessionId) return;
 
-                const eventSource = new EventSource(`/sessions/${currentSessionId}/stream`);
+                const eventSource = new EventSource(`/api/sessions/${currentSessionId}/stream`);
                 
                 eventSource.onopen = () => {
                     setIsConnected(true);
@@ -416,7 +418,7 @@
                 if (!message.trim()) return;
 
                 try {
-                    const response = await fetch(`/sessions/${currentSessionId}/send-message`, {
+                    const response = await fetch(`/api/sessions/${currentSessionId}/send-message`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                         body: 'q=' + encodeURIComponent(message)
@@ -432,7 +434,7 @@
 
             const chooseOption = async (optionIndex) => {
                 try {
-                    await fetch(`/sessions/${currentSessionId}/choose-option`, {
+                    await fetch(`/api/sessions/${currentSessionId}/choose-option`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                         body: 'choice=' + encodeURIComponent(optionIndex)
@@ -759,7 +761,7 @@
 
             const createNewSession = async () => {
                 try {
-                    const data = await fetchJSON('/sessions', { method: 'POST' });
+                    const data = await fetchJSON('/api/sessions', { method: 'POST' });
                     await fetchSessions(); // refresh list
                     setCurrentSessionId(data.id);
                 } catch (err) {
@@ -767,11 +769,21 @@
                 }
             };
 
+            async function toggleDrawer() {
+                if (!showDrawer && promptGroups.length === 0) {
+                    try {
+                        const data = await fetchJSON('/api/prompts');
+                        setPromptGroups(data);
+                    } catch(err) { console.error('fetch prompts', err);}    
+                }
+                setShowDrawer(!showDrawer);
+            }
+
             const renameSessionPrompt = async (session) => {
                 const newName = prompt('Enter new session name:', session.Name || 'New Session');
                 if (newName && newName.trim() !== '') {
                     try {
-                        await fetch(`/sessions/${session.ID}/rename`, {
+                        await fetch(`/api/sessions/${session.ID}/rename`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                             body: 'name=' + encodeURIComponent(newName.trim())
@@ -794,6 +806,7 @@
             };
 
             return (
+                <>
                 <div className={`flex h-screen ${isDarkMode ? 'bg-gradient-to-br from-slate-900 to-gray-900' : 'bg-gradient-to-br from-slate-50 to-blue-50'}`}>
                     {/* Sidebar */}
                     <div className={`${isDarkMode ? 'bg-gray-900/80 border-gray-800' : 'bg-white/80 border-gray-200'} backdrop-blur-sm w-64 border-r flex flex-col`}> 
@@ -848,6 +861,10 @@
                                             {isConnected ? 'Connected' : 'Connecting...'}
                                         </span>
                                     </div>
+                                    {/* Prompt library button */}
+                                    <button onClick={toggleDrawer} className={`p-2 rounded-lg ${isDarkMode?'text-gray-300 hover:text-gray-100':'text-gray-600 hover:text-gray-800'}`} title="Prompt Library">
+                                        💡
+                                    </button>
                                     {/* Dark Mode Toggle */}
                                     <button
                                         onClick={toggleDarkMode}
@@ -952,6 +969,28 @@
                         </div>
                     </div>
                 </div>
+                {/* Prompt Drawer */}
+                <div className={`fixed top-0 right-0 h-full w-80 bg-white dark:bg-gray-900 shadow-xl transform transition-transform duration-300 flex flex-col z-50 ${showDrawer ? 'translate-x-0 visible' : 'translate-x-full invisible'}`}>
+                    <div className="flex items-center justify-between px-4 py-3 border-b dark:border-gray-700">
+                        <span className={isDarkMode? 'text-white':'text-gray-800'}>Prompt Library</span>
+                        <button onClick={toggleDrawer} className="text-xl">×</button>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
+                        {(promptGroups || []).map(pg => (
+                            <details key={pg.group} className="mb-3">
+                                <summary className="cursor-pointer font-semibold mb-2 text-brand-600 dark:text-brand-400">{pg.group}</summary>
+                                <div className="mt-2 space-y-2">
+                                    {(pg.items || []).map((it, idx) => (
+                                        <button key={`${pg.group}-${idx}`} onClick={() => { setInput(it); setShowDrawer(false); inputRef.current.focus(); }} className="block w-full text-left px-3 py-2 bg-brand-50 dark:bg-gray-800 hover:bg-brand-100 dark:hover:bg-gray-700 rounded">
+                                            {it}
+                                        </button>
+                                    ))}
+                                </div>
+                            </details>
+                        ))}
+                    </div>
+                </div>
+                </>
             );
         }
 

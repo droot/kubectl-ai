@@ -104,6 +104,8 @@ type HTMLUserInterface struct {
 	// broadcasterMap holds a broadcaster per sessionID.
 	broadcasterMap map[string]*Broadcaster
 	bMu            sync.Mutex // protects broadcasterMap
+
+	promptGroups []api.PromptGroup
 }
 
 var _ ui.UI = &HTMLUserInterface{}
@@ -115,24 +117,25 @@ func NewHTMLUserInterface(sessions *agent.SessionManager, listenAddress string, 
 		sessions:       sessions,
 		journal:        journal,
 		broadcasterMap: make(map[string]*Broadcaster),
+		promptGroups:   nil,
 	}
+
+	// API routes
+	mux.HandleFunc("GET /api/prompts", u.handleGetPrompts)
+	mux.HandleFunc("GET /api/sessions", u.handleListSessions)
+	mux.HandleFunc("POST /api/sessions", u.handleCreateSession)
+	mux.HandleFunc("POST /api/sessions/{id}/rename", u.handleRenameSession)
+	mux.HandleFunc("GET /api/sessions/{id}/stream", u.handleSessionStream)
+	mux.HandleFunc("POST /api/sessions/{id}/send-message", u.handlePOSTSendMessage)
+	mux.HandleFunc("POST /api/sessions/{id}/choose-option", u.handlePOSTChooseOption)
+
+	// Frontend
+	mux.HandleFunc("/", u.serveIndex)
 
 	httpServer := &http.Server{
 		Addr:    listenAddress,
 		Handler: mux,
 	}
-
-	mux.HandleFunc("GET /", u.serveIndex)
-
-	// Sessions collection
-	mux.HandleFunc("GET /sessions", u.handleListSessions)
-	mux.HandleFunc("POST /sessions", u.handleCreateSession)
-	mux.HandleFunc("POST /sessions/{id}/rename", u.handleRenameSession)
-
-	// Session-specific routes
-	mux.HandleFunc("GET /sessions/{id}/stream", u.handleSessionStream)
-	mux.HandleFunc("POST /sessions/{id}/send-message", u.handlePOSTSendMessage)
-	mux.HandleFunc("POST /sessions/{id}/choose-option", u.handlePOSTChooseOption)
 
 	httpServerListener, err := net.Listen("tcp", listenAddress)
 	if err != nil {
@@ -153,6 +156,13 @@ func NewHTMLUserInterface(sessions *agent.SessionManager, listenAddress string, 
 		return nil, fmt.Errorf("error initializing the markdown renderer: %w", err)
 	}
 	u.markdownRenderer = mdRenderer
+
+	// Load prompt library
+	if pg, err := loadPromptLibrary(); err == nil {
+		u.promptGroups = pg
+	} else {
+		klog.Warningf("failed to load prompt library: %v", err)
+	}
 
 	// Ensure there is at least one default session so the UI works out of the box.
 	if _, err := u.ensureDefaultSession(context.Background()); err != nil {
@@ -453,4 +463,13 @@ func (u *HTMLUserInterface) handleSessionStream(w http.ResponseWriter, req *http
 			flusher.Flush()
 		}
 	}
+}
+
+func (u *HTMLUserInterface) handleGetPrompts(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	prompts := u.promptGroups
+	if prompts == nil {
+		prompts = []api.PromptGroup{}
+	}
+	json.NewEncoder(w).Encode(prompts)
 }
