@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/api"
@@ -66,6 +67,18 @@ func (sm *SessionManager) ListSessions() []*api.Session {
 		out = append(out, ag.Session())
 	}
 	return out
+}
+
+// RenameSession sets the Name of the session. Returns error if not found.
+func (sm *SessionManager) RenameSession(sessionID, newName string) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	ag, ok := sm.sessions[sessionID]
+	if !ok {
+		return fmt.Errorf("session not found")
+	}
+	ag.UpdateSessionName(newName)
+	return nil
 }
 
 // Close shuts down all Agents and clears the manager.  Any errors encountered

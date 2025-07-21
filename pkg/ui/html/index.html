@@ -348,6 +348,10 @@
                 };
             }, []);
 
+            // parse session param from URL
+            const urlParams = new URLSearchParams(window.location.search);
+            const sessionFromURL = urlParams.get('session');
+
             // Load session list on mount
             useEffect(() => {
                 fetchSessions();
@@ -357,7 +361,9 @@
                 try {
                     const data = await fetchJSON('/sessions');
                     setSessions(data);
-                    if (!currentSessionId && data.length > 0) {
+                    if (sessionFromURL && data.some(s=>s.ID===sessionFromURL)) {
+                        setCurrentSessionId(sessionFromURL);
+                    } else if (!currentSessionId && data.length > 0) {
                         setCurrentSessionId(data[0].ID);
                     }
                 } catch (err) {
@@ -761,6 +767,32 @@
                 }
             };
 
+            const renameSessionPrompt = async (session) => {
+                const newName = prompt('Enter new session name:', session.Name || 'New Session');
+                if (newName && newName.trim() !== '') {
+                    try {
+                        await fetch(`/sessions/${session.ID}/rename`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                            body: 'name=' + encodeURIComponent(newName.trim())
+                        });
+                        await fetchSessions(); // refresh list
+                    } catch (err) {
+                        console.error('Error renaming session:', err);
+                        alert('Failed to rename session.');
+                    }
+                }
+            };
+
+            const shareSession = (session) => {
+                const shareUrl = `${window.location.origin}?session=${session.ID}`;
+                navigator.clipboard.writeText(shareUrl).then(()=>{
+                    alert('Share link copied to clipboard');
+                }).catch(()=>{
+                    prompt('Copy session link:', shareUrl);
+                });
+            };
+
             return (
                 <div className={`flex h-screen ${isDarkMode ? 'bg-gradient-to-br from-slate-900 to-gray-900' : 'bg-gradient-to-br from-slate-50 to-blue-50'}`}>
                     {/* Sidebar */}
@@ -771,11 +803,20 @@
                         </div>
                         <div className="flex-1 overflow-y-auto custom-scrollbar">
                             {sessions.map((s) => (
-                                <button key={s.ID} onClick={() => setCurrentSessionId(s.ID)}
-                                    className={`w-full text-left px-4 py-2 hover:bg-brand-50 dark:hover:bg-gray-800 ${currentSessionId===s.ID ? (isDarkMode ? 'bg-gray-800' : 'bg-brand-100') : ''}`}> 
-                                    <div className={`${isDarkMode ? 'text-gray-200' : 'text-gray-800'} truncate`}>{s.ID.slice(0,8)}</div>
-                                    <div className="text-xs text-gray-500 truncate">{s.LastMessage || ''}</div>
-                                </button>
+                                <div key={s.ID} className={`px-2 py-1 ${currentSessionId===s.ID ? (isDarkMode ? 'bg-gray-800' : 'bg-brand-100') : ''}`}> 
+                                    <div className="flex items-center">
+                                        <button onClick={() => setCurrentSessionId(s.ID)} className="flex-1 text-left">
+                                            <div className={`${isDarkMode ? 'text-gray-200' : 'text-gray-800'} truncate`}>{s.Name || ('session-'+s.ID.slice(0,8))}</div>
+                                            <div className="text-xs text-gray-500 truncate">{s.LastMessage || ''}</div>
+                                        </button>
+                                        <button onClick={() => renameSessionPrompt(s)} className="ml-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300" title="Rename">
+                                            ✏️
+                                        </button>
+                                        <button onClick={() => shareSession(s)} className="ml-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300" title="Share">
+                                            🔗
+                                        </button>
+                                    </div>
+                                </div>
                             ))}
                         </div>
                     </div>

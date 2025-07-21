@@ -135,6 +135,15 @@ func (s *Agent) Session() *api.Session {
 	return &sessionCopy
 }
 
+// UpdateSessionName updates the human-friendly name of the session in a
+// threadsafe manner.
+func (s *Agent) UpdateSessionName(name string) {
+	s.sessionMu.Lock()
+	defer s.sessionMu.Unlock()
+	s.session.Name = name
+	s.session.LastModified = time.Now()
+}
+
 // addMessage creates a new message, adds it to the session, and sends it to the output channel
 func (c *Agent) addMessage(source api.MessageSource, messageType api.MessageType, payload any) *api.Message {
 	c.sessionMu.Lock()
@@ -192,8 +201,10 @@ func (s *Agent) Init(ctx context.Context) error {
 
 	// TODO: this is ephemeral for now, but in the future, we will support
 	// session persistence.
+	sid := uuid.New().String()
 	s.session = &api.Session{
-		ID:           uuid.New().String(),
+		ID:           sid,
+		Name:         "session-" + sid[:8],
 		Messages:     []*api.Message{},
 		AgentState:   api.AgentStateIdle,
 		CreatedAt:    time.Now(),

@@ -127,6 +127,7 @@ func NewHTMLUserInterface(sessions *agent.SessionManager, listenAddress string, 
 	// Sessions collection
 	mux.HandleFunc("GET /sessions", u.handleListSessions)
 	mux.HandleFunc("POST /sessions", u.handleCreateSession)
+	mux.HandleFunc("POST /sessions/{id}/rename", u.handleRenameSession)
 
 	// Session-specific routes
 	mux.HandleFunc("GET /sessions/{id}/stream", u.handleSessionStream)
@@ -387,6 +388,24 @@ func (u *HTMLUserInterface) handleCreateSession(w http.ResponseWriter, req *http
 
 	resp := map[string]string{"id": ag.Session().ID}
 	json.NewEncoder(w).Encode(resp)
+}
+
+func (u *HTMLUserInterface) handleRenameSession(w http.ResponseWriter, req *http.Request) {
+	sessionID := req.PathValue("id")
+	if err := req.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	newName := req.FormValue("name")
+	if newName == "" {
+		http.Error(w, "missing name", http.StatusBadRequest)
+		return
+	}
+	if err := u.sessions.RenameSession(sessionID, newName); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 func (u *HTMLUserInterface) handleSessionStream(w http.ResponseWriter, req *http.Request) {

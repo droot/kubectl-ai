@@ -18,6 +18,7 @@ import "time"
 
 type Session struct {
 	ID           string
+	Name         string
 	Messages     []*Message
 	AgentState   AgentState
 	CreatedAt    time.Time
