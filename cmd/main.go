@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/GoogleCloudPlatform/kubectl-ai/gollm"
@@ -115,6 +116,12 @@ type Options struct {
 
 	// SkipVerifySSL is a flag to skip verifying the SSL certificate of the LLM provider.
 	SkipVerifySSL bool `json:"skipVerifySSL,omitempty"`
+
+	// UseSandbox enables execution of tools in a Kubernetes sandbox environment
+	UseSandbox bool `json:"useSandbox,omitempty"`
+
+	// SandboxImage is the container image to use for the sandbox
+	SandboxImage string `json:"sandboxImage,omitempty"`
 }
 
 var defaultToolConfigPaths = []string{
@@ -158,6 +165,9 @@ func (o *Options) InitDefaults() {
 	o.MCPServerMode = "stdio"
 	// Default port for SSE endpoint
 	o.SSEndpointPort = 9080
+	// Default sandbox settings
+	o.UseSandbox = false
+	o.SandboxImage = "bitnami/kubectl:latest"
 }
 
 func (o *Options) LoadConfiguration(b []byte) error {
@@ -206,6 +216,25 @@ func (o *Options) LoadConfigurationFile() error {
 	return nil
 }
 
+// Global cleanup functions to be called on shutdown
+var cleanupFunctions []func()
+var cleanupMutex sync.Mutex
+
+func registerCleanup(fn func()) {
+	cleanupMutex.Lock()
+	defer cleanupMutex.Unlock()
+	cleanupFunctions = append(cleanupFunctions, fn)
+}
+
+func runCleanup() {
+	cleanupMutex.Lock()
+	defer cleanupMutex.Unlock()
+	for _, fn := range cleanupFunctions {
+		fn()
+	}
+	cleanupFunctions = nil
+}
+
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -214,6 +243,11 @@ func main() {
 		<-ctx.Done()
 		// restore default behavior for a second signal
 		signal.Stop(make(chan os.Signal))
+
+		// Run cleanup functions immediately when signal is received
+		klog.Info("Signal received, running cleanup functions")
+		runCleanup()
+
 		cancel()
 		klog.Flush()
 		fmt.Fprintf(os.Stderr, "\nReceived signal, shutting down gracefully... (press Ctrl+C again to force)\n")
@@ -299,11 +333,15 @@ func (opt *Options) bindCLIFlags(f *pflag.FlagSet) error {
 	f.StringVar(&opt.UIListenAddress, "ui-listen-address", opt.UIListenAddress, "address to listen for the HTML UI.")
 	f.BoolVar(&opt.SkipVerifySSL, "skip-verify-ssl", opt.SkipVerifySSL, "skip verifying the SSL certificate of the LLM provider")
 
+	f.BoolVar(&opt.UseSandbox, "use-sandbox", opt.UseSandbox, "execute tools in a Kubernetes sandbox environment")
+	f.StringVar(&opt.SandboxImage, "sandbox-image", opt.SandboxImage, "container image to use for the sandbox")
+
 	return nil
 }
 
 func RunRootCommand(ctx context.Context, opt Options, args []string) error {
-	var err error // Declare err once for the whole function
+	var err error             // Declare err once for the whole function
+	var k8sAgent *agent.Agent // Declare agent at function scope for cleanup
 
 	// Validate flag combinations
 	if opt.ExternalTools && !opt.MCPServer {
@@ -368,7 +406,7 @@ func RunRootCommand(ctx context.Context, opt Options, args []string) error {
 		defer recorder.Close()
 	}
 
-	k8sAgent := &agent.Agent{
+	k8sAgent = &agent.Agent{
 		Model:              opt.ModelID,
 		Kubeconfig:         opt.KubeConfigPath,
 		LLM:                llmClient,
@@ -381,6 +419,8 @@ func RunRootCommand(ctx context.Context, opt Options, args []string) error {
 		SkipPermissions:    opt.SkipPermissions,
 		EnableToolUseShim:  opt.EnableToolUseShim,
 		MCPClientEnabled:   opt.MCPClient,
+		UseSandbox:         opt.UseSandbox,
+		SandboxImage:       opt.SandboxImage,
 		RunOnce:            opt.Quiet,
 		InitialQuery:       queryFromCmd,
 	}
@@ -389,7 +429,22 @@ func RunRootCommand(ctx context.Context, opt Options, args []string) error {
 	if err != nil {
 		return fmt.Errorf("starting k8s agent: %w", err)
 	}
-	defer k8sAgent.Close()
+
+	// Register cleanup function for signal-based shutdown
+	registerCleanup(func() {
+		klog.Info("Signal-based cleanup: Closing agent")
+		if err := k8sAgent.Close(); err != nil {
+			klog.Errorf("Error during signal-based agent cleanup: %v", err)
+		}
+	})
+
+	// Ensure agent cleanup happens regardless of how the function exits
+	defer func() {
+		klog.Info("Defer-based cleanup: Closing agent")
+		if err := k8sAgent.Close(); err != nil {
+			klog.Errorf("Error during defer-based agent cleanup: %v", err)
+		}
+	}()
 
 	var userInterface ui.UI
 	switch opt.UIType {
