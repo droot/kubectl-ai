@@ -1,7 +1,8 @@
 - group: Getting Started
   items:
-    - "What can kubectl-ai do?"
+    - "Check recent activity in the cluster and highlight any issues."
     - "List all pods in the default namespace."
+    - "List all pods in the kube-system namespace."
     - "Explain what a Deployment is in Kubernetes."
 - group: Debugging
   items:
