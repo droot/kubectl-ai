@@ -1,3 +1,7 @@
+- group: Analyze
+  items:
+    - "Analyze resource usage in the cluster and list top pods by memory and cpu usage."
+    - "Analyze resource usage in the cluster and list top namespaces by memory and cpu usage."
 - group: Getting Started
   items:
     - "Check recent activity in the cluster and highlight any issues."

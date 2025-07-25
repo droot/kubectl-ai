@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/ui"
 	"github.com/charmbracelet/glamour"
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/genai"
 	"k8s.io/klog/v2"
 )
 
@@ -128,6 +130,7 @@ func NewHTMLUserInterface(sessions *agent.SessionManager, listenAddress string, 
 	mux.HandleFunc("GET /api/sessions/{id}/stream", u.handleSessionStream)
 	mux.HandleFunc("POST /api/sessions/{id}/send-message", u.handlePOSTSendMessage)
 	mux.HandleFunc("POST /api/sessions/{id}/choose-option", u.handlePOSTChooseOption)
+	mux.HandleFunc("POST /api/visualize", u.handleVisualize)
 
 	// Frontend
 	mux.HandleFunc("/", u.serveIndex)
@@ -465,6 +468,41 @@ func (u *HTMLUserInterface) handleSessionStream(w http.ResponseWriter, req *http
 	}
 }
 
+func (u *HTMLUserInterface) handleVisualize(w http.ResponseWriter, req *http.Request) {
+	ctx := req.Context()
+	log := klog.FromContext(ctx)
+
+	var payload struct {
+		Description string `json:"description"`
+		Model       string `json:"model,omitempty"`
+	}
+
+	if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if payload.Description == "" {
+		http.Error(w, "description cannot be empty", http.StatusBadRequest)
+		return
+	}
+
+	modelName := payload.Model
+	if modelName == "" {
+		modelName = "gemini-2.5-flash-lite"
+	}
+
+	html, err := generateUI(ctx, modelName, payload.Description)
+	if err != nil {
+		log.Error(err, "generating UI")
+		http.Error(w, "error generating UI", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html")
+	w.Write([]byte(html))
+}
+
 func (u *HTMLUserInterface) handleGetPrompts(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	prompts := u.promptGroups
@@ -472,4 +510,57 @@ func (u *HTMLUserInterface) handleGetPrompts(w http.ResponseWriter, req *http.Re
 		prompts = []api.PromptGroup{}
 	}
 	json.NewEncoder(w).Encode(prompts)
+}
+
+// generateUI calls the Gemini model with the appropriate prompt and returns the raw HTML.
+func generateUI(parentCtx context.Context, modelName string, userQuery string) (string, error) {
+	ctx, cancel := context.WithTimeout(parentCtx, 2*time.Minute)
+	defer cancel()
+
+	apiKey := os.Getenv("GEMINI_API_KEY")
+	if apiKey == "" {
+		return "", fmt.Errorf("GEMINI_API_KEY env var must be set")
+	}
+
+	client, err := genai.NewClient(ctx, &genai.ClientConfig{
+		APIKey: apiKey,
+	})
+	if err != nil {
+		return "", fmt.Errorf("genai.NewClient: %w", err)
+	}
+
+	prompt := fmt.Sprintf(`You are Flash Lite, an expert conversational AI specializing in UI generation.
+Your primary goal is to respond to the user's message by generating a self-contained HTML UI component.
+This UI component should directly address or visualize the user's request.
+The HTML you generate MUST be a single block of code. It must include all necessary HTML structure, CSS within <style> tags, and JavaScript within <script> tags if needed for interactivity.
+The generated UI should be visually appealing, modern, and functional, and add animations where it makes sense.
+Only output the raw HTML code. Do not include markdown fences, explanations, or any text outside the HTML structure itself.
+
+User's message: "%s"
+
+Your response (HTML):`, userQuery)
+
+	resp, err := client.Models.GenerateContent(ctx, modelName, []*genai.Content{genai.NewContentFromText(prompt, "user")}, nil)
+	if err != nil {
+		return "", fmt.Errorf("GenerateContent: %w", err)
+	}
+
+	if resp == nil {
+		return "", fmt.Errorf("received nil response from model")
+	}
+	html := resp.Text()
+
+	// Trim markdown fences.
+	html = strings.TrimSpace(html)
+	if strings.HasPrefix(html, "```html") {
+		html = strings.TrimPrefix(html, "```html")
+	} else if strings.HasPrefix(html, "```") {
+		html = strings.TrimPrefix(html, "```")
+	}
+	if strings.HasSuffix(html, "```") {
+		html = strings.TrimSuffix(html, "```")
+	}
+	html = strings.TrimSpace(html)
+
+	return html, nil
 }
