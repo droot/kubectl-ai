@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -64,15 +63,6 @@ func New(name string, opts ...Option) (*Sandbox, error) {
 		}
 	}
 
-	// Use default kubeconfig if not specified
-	if s.kubeconfig == "" {
-		defaultKubeconfig, err := getDefaultKubeconfig()
-		if err != nil {
-			return nil, fmt.Errorf("no kubeconfig specified and failed to find default: %v", err)
-		}
-		s.kubeconfig = defaultKubeconfig
-	}
-
 	// Initialize Kubernetes client
 	config, err := clientcmd.BuildConfigFromFlags("", s.kubeconfig)
 	if err != nil {
@@ -88,27 +78,6 @@ func New(name string, opts ...Option) (*Sandbox, error) {
 	s.clientset = clientset
 
 	return s, nil
-}
-
-// getDefaultKubeconfig tries to find the default kubeconfig file
-func getDefaultKubeconfig() (string, error) {
-	// Try the standard kubeconfig path
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to get user home directory: %v", err)
-	}
-
-	defaultPath := filepath.Join(homeDir, ".kube", "config")
-	if _, err := os.Stat(defaultPath); err == nil {
-		return defaultPath, nil
-	}
-
-	// Could also check KUBECONFIG environment variable here
-	if kubeconfigEnv := os.Getenv("KUBECONFIG"); kubeconfigEnv != "" {
-		return kubeconfigEnv, nil
-	}
-
-	return "", fmt.Errorf("no kubeconfig found at %s and KUBECONFIG not set", defaultPath)
 }
 
 // WithKubeconfig sets the kubeconfig file path

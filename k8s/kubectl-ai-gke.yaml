@@ -51,6 +51,7 @@ spec:
         - --llm-provider=vertexai
         - --v=4
         - --alsologtostderr
+        - --use-sandbox
         env:
         - name: GOOGLE_CLOUD_PROJECT
           value: "PROJECT_ID"

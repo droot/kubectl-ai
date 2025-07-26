@@ -675,7 +675,14 @@ func resolveKubeConfigPath(opt *Options) error {
 		if err != nil {
 			return fmt.Errorf("failed to get user home directory: %w", err)
 		}
-		opt.KubeConfigPath = filepath.Join(home, ".kube", "config")
+		defaultConfigPath := filepath.Join(home, ".kube", "config")
+		// set this only if the file exists, if running in kubernetes cluster, the default kubeconfig file is not present
+		if _, err := os.Stat(defaultConfigPath); os.IsNotExist(err) {
+			klog.Warningf("default kubeconfig file %q does not exist, using empty kubeconfig", defaultConfigPath)
+			opt.KubeConfigPath = ""
+		} else {
+			opt.KubeConfigPath = defaultConfigPath
+		}
 	}
 
 	// We resolve the kubeconfig path to an absolute path, so we can run kubectl from any working directory.
