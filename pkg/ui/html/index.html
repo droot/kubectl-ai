@@ -352,13 +352,24 @@
             }, [messages]);
 
             const toggleOutput = (messageIndex) => {
+                const isCurrentlyExpanded = expandedOutputs.has(messageIndex);
                 const newExpanded = new Set(expandedOutputs);
-                if (newExpanded.has(messageIndex)) {
+                if (isCurrentlyExpanded) {
                     newExpanded.delete(messageIndex);
                 } else {
                     newExpanded.add(messageIndex);
                 }
                 setExpandedOutputs(newExpanded);
+
+                // If we just expanded, scroll that message into view after state update
+                if (!isCurrentlyExpanded) {
+                    setTimeout(() => {
+                        const el = document.getElementById(`msg-${messageIndex}`);
+                        if (el) {
+                            el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        }
+                    }, 50); // slight delay to allow DOM to update
+                }
             };
 
             const toggleDarkMode = () => {
@@ -618,8 +629,8 @@
                     return null;
                 };
 
-                const MessageWrapper = ({ children, className = "", isUser = false }) => (
-                    <div className={"message-enter mb-6 " + className}>
+                const MessageWrapper = ({ children, className = "", isUser = false, idx }) => (
+                    <div id={`msg-${idx}`} className={"message-enter mb-6 " + className}>
                         <div className="flex items-start space-x-3"> 
                             <div className={"flex-shrink-0 w-8 h-8 rounded-full " + sourceInfo.bg + " flex items-center justify-center text-sm"}>
                                 {sourceInfo.avatar}
@@ -650,7 +661,7 @@
                     case 'text':
                     case 'user-input-request':
                         return (
-                            <MessageWrapper key={index} isUser={message.Source === 'user'}>
+                            <MessageWrapper key={index} isUser={message.Source === 'user'} idx={index}>
                                 <div className={`prose leading-relaxed ${isDarkMode ? 'text-gray-300' : 'text-gray-700'} ${message.Source==='user' ? (isDarkMode ? 'bg-gray-800' : 'bg-gray-100') + ' rounded-lg p-3' : ''}`}
                                      dangerouslySetInnerHTML={{ __html: formatMessage(message.Payload) }} />
                             </MessageWrapper>
@@ -658,7 +669,7 @@
                     
                     case 'error':
                         return (
-                            <MessageWrapper key={index} className="error-message">
+                            <MessageWrapper key={index} className="error-message" idx={index}>
                                 <div className={`${isDarkMode ? 'bg-red-900/30 border-red-800' : 'bg-red-50 border-red-200'} border rounded-lg p-4`}>
                                     <div className="flex items-center">
                                         <span className={`${isDarkMode ? 'text-red-400' : 'text-red-600'} text-lg mr-2`}>⚠️</span>
@@ -701,7 +712,7 @@
                         const hasOutput = outputText && outputText.trim().length > 0;
                         
                         return (
-                            <MessageWrapper key={index}>
+                            <MessageWrapper key={index} idx={index}>
                                 <div className={`border rounded-lg p-4 ${isCompleted ? (isDarkMode ? 'border-emerald-700 bg-emerald-900/20' : 'border-emerald-200 bg-emerald-50') : (isDarkMode ? 'border-blue-700 bg-blue-900/20' : 'border-blue-200 bg-blue-50')}`}>
                                     <div className="flex items-center">
                                         {isCompleted ? (
@@ -752,7 +763,7 @@
                     case 'user-choice-request':
                         const choiceRequest = message.Payload;
                         return (
-                            <MessageWrapper key={index}>
+                            <MessageWrapper key={index} idx={index}>
                                 <div className={`border rounded-xl p-6 shadow-sm ${isDarkMode ? 'border-amber-700 bg-amber-900/20' : 'border-amber-200 bg-amber-50'}`}>
                                     <div className="flex items-center mb-4">
                                         <span className={`${isDarkMode ? 'text-amber-400' : 'text-amber-600'} text-lg mr-2`}>🤔</span>
@@ -790,7 +801,7 @@
                     
                     default:
                         return (
-                            <MessageWrapper key={index}>
+                            <MessageWrapper key={index} idx={index}>
                                 <div className={`border rounded-lg p-4 ${isDarkMode ? 'bg-yellow-900/20 border-yellow-700' : 'bg-yellow-50 border-yellow-200'}`}>
                                     <div className={`font-medium mb-2 ${isDarkMode ? 'text-yellow-300' : 'text-yellow-800'}`}>Debug Information</div>
                                     <pre className={`text-xs overflow-x-auto font-mono ${isDarkMode ? 'text-yellow-400' : 'text-yellow-700'}`}>
@@ -1122,7 +1133,7 @@
                         onClick={toggleDrawer}
                     ></div>
                 )}
-                <div className={`fixed bottom-0 left-0 w-full max-h-[45vh] bg-white dark:bg-gray-900 shadow-2xl rounded-t-2xl transform transition-transform duration-300 ease-in-out flex flex-col z-50 ${showDrawer ? 'translate-y-0 visible' : 'translate-y-full invisible'}`}>
+                <div className={`fixed bottom-20 right-4 w-11/12 sm:w-96 max-h-[60vh] bg-white dark:bg-gray-900 shadow-2xl rounded-2xl transform transition-transform duration-300 ease-in-out flex flex-col z-50 ${showDrawer ? 'translate-y-0 visible' : 'translate-y-full invisible'}`}>
                     <div className="flex items-center justify-between px-4 py-3 border-b dark:border-gray-700 flex-shrink-0">
                         <span className={`font-semibold ${isDarkMode? 'text-white':'text-gray-800'}`}>Prompt Library</span>
                         <button onClick={toggleDrawer} className={`p-1 rounded-full ${isDarkMode? 'text-gray-400 hover:bg-gray-700':'text-gray-500 hover:bg-gray-200'}`}>
@@ -1137,7 +1148,7 @@
                                 <summary className="cursor-pointer font-semibold mb-2 text-brand-600 dark:text-brand-400">{pg.group}</summary>
                                 <div className="mt-2 space-y-2">
                                     {(pg.items || []).map((it, idx) => (
-                                        <button key={`${pg.group}-${idx}`} onClick={() => { setInput(it); setShowDrawer(false); inputRef.current.focus(); }} className="block w-full text-left px-3 py-2 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg">
+                                        <button key={`${pg.group}-${idx}`} onClick={() => { setInput(it); setShowDrawer(false); inputRef.current.focus(); }} className="block w-full text-left px-3 py-2 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg cursor-pointer">
                                             {it}
                                         </button>
                                     ))}
