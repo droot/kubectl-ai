@@ -279,13 +279,10 @@
             const [expandedOutputs, setExpandedOutputs] = useState(new Set());
             const [showDrawer, setShowDrawer] = useState(false);
             const [promptGroups, setPromptGroups] = useState([]);
-            const [showVisualize, setShowVisualize] = useState(false);
-            const [visualizeContent, setVisualizeContent] = useState({ lite: '', pro: '' });
-            const [isVisualizing, setIsVisualizing] = useState({ lite: false, pro: false });
+            const [visualizationCache, setVisualizationCache] = useState({});
             const [visualizationMode, setVisualizationMode] = useState(() => {
                 return localStorage.getItem('kubectl-ai-viz-mode') || 'single';
             });
-            const [activeVizTab, setActiveVizTab] = useState('lite');
             const [sidebarWidth, setSidebarWidth] = useState(() => {
                 const savedWidth = localStorage.getItem('kubectl-ai-sidebar-width');
                 return savedWidth ? parseInt(savedWidth, 10) : 260; // Default width
@@ -522,45 +519,62 @@
                 }
             };
 
-            const visualizeMessage = async (messageContent) => {
+            const visualizeMessage = async (cacheKey, messageContent) => {
                 if (typeof messageContent !== 'string' || !messageContent) {
                     alert('No message content to visualize.');
                     return;
                 }
 
-                setShowVisualize(true);
-                setVisualizeContent({ lite: '', pro: '' });
-                setActiveVizTab('lite');
+                setVisualizationCache(prev => ({
+                    ...prev,
+                    [cacheKey]: {
+                        ...prev[cacheKey],
+                        lite: { loading: true, content: prev[cacheKey]?.lite?.content || null },
+                        pro: visualizationMode === 'dual' ? { loading: true, content: prev[cacheKey]?.pro?.content || null } : prev[cacheKey]?.pro
+                    }
+                }));
 
                 const fetchVisualization = async (model, modelKey) => {
-                    setIsVisualizing(prev => ({ ...prev, [modelKey]: true }));
                     try {
                         const response = await fetch(`/api/visualize`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ description: messageContent, model: model })
                         });
-                        if (response.ok) {
-                            const html = await response.text();
-                            setVisualizeContent(prev => ({ ...prev, [modelKey]: html }));
-                        } else {
-                            const errorText = await response.text();
-                            console.error(`Error visualizing with ${model}:`, errorText);
-                            setVisualizeContent(prev => ({ ...prev, [modelKey]: `<div class="p-4 text-red-500">Error: ${errorText}</div>` }));
-                        }
+                        const html = await response.text();
+                        
+                        const newContent = {
+                            loading: false,
+                            content: response.ok ? html : `<div class="p-4 text-red-500 dark:text-red-400">Error: ${html}</div>`
+                        };
+
+                        setVisualizationCache(prev => ({
+                            ...prev,
+                            [cacheKey]: {
+                                ...prev[cacheKey],
+                                [modelKey]: newContent
+                            }
+                        }));
+
                     } catch (error) {
                         console.error(`Error visualizing with ${model}:`, error);
-                        setVisualizeContent(prev => ({ ...prev, [modelKey]: `<div class="p-4 text-red-500">A network error occurred.</div>` }));
-                    } finally {
-                        setIsVisualizing(prev => ({ ...prev, [modelKey]: false }));
+                        const errorContent = {
+                            loading: false,
+                            content: `<div class="p-4 text-red-500 dark:text-red-400">A network error occurred.</div>`
+                        };
+                        setVisualizationCache(prev => ({
+                            ...prev,
+                            [cacheKey]: {
+                                ...prev[cacheKey],
+                                [modelKey]: errorContent
+                            }
+                        }));
                     }
                 };
 
+                fetchVisualization('gemini-2.5-flash-lite', 'lite');
                 if (visualizationMode === 'dual') {
-                    fetchVisualization('gemini-2.5-flash-lite', 'lite');
                     fetchVisualization('gemini-2.5-flash', 'pro');
-                } else {
-                    fetchVisualization('gemini-2.5-flash-lite', 'lite');
                 }
             };
 
@@ -586,6 +600,120 @@
                     console.error('Error formatting message:', error);
                     return message.replace(/\n/g, '<br>');
                 }
+            };
+
+            const InlineVisualization = ({ vizData, isDarkMode }) => {
+                if (!vizData) return null;
+
+                const [activeTab, setActiveTab] = useState('lite');
+                const liteRef = useRef(null);
+                const proRef = useRef(null);
+
+                const adjustSize = (ref) => {
+                    if (!ref?.current) return;
+                    try {
+                        const doc = ref.current.contentDocument || ref.current.contentWindow.document;
+                        if (doc && doc.body) {
+                            ref.current.style.height = doc.body.scrollHeight + 'px';
+                            // If the content is wider than the container, allow horizontal scroll within iframe
+                            ref.current.style.width = '100%';
+                        }
+                    } catch (_) {
+                        /* Ignore cross-origin adjustments */
+                    }
+                };
+
+                const renderIframe = (data, ref) => {
+                    if (!data) return null;
+                    if (data.loading) {
+                        return (
+                            <div className="flex items-center justify-center h-48">
+                                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-purple-500"></div>
+                            </div>
+                        );
+                    }
+                    if (data.content) {
+                        return (
+                            <iframe
+                                srcDoc={data.content}
+                                className="w-full border-0 bg-transparent block"
+                                style={{ minHeight: '200px', width: '100%' }}
+                                title="Visualization"
+                                sandbox="allow-scripts allow-forms allow-same-origin"
+                                ref={ref}
+                                onLoad={(e) => {
+                                    adjustSize({ current: e.target });
+                                    try {
+                                        const doc = e.target.contentDocument || e.target.contentWindow.document;
+                                        doc.body.style.margin = '0';
+                                        doc.body.style.overflow = 'hidden';
+                                    } catch (_) {}
+                                }}
+                            ></iframe>
+                        );
+                    }
+                    return null;
+                };
+
+                // Auto-fit whenever the HTML content becomes available / changes
+                useEffect(() => {
+                    if (vizData?.lite?.content && liteRef.current) {
+                        adjustSize(liteRef);
+                    }
+                    if (vizData?.pro?.content && proRef.current) {
+                        adjustSize(proRef);
+                    }
+                    // We only care when content changes
+                    // eslint-disable-next-line react-hooks/exhaustive-deps
+                }, [vizData?.lite?.content, vizData?.pro?.content]);
+
+                const hasData = vizData.lite || vizData.pro;
+                if (!hasData) return null;
+
+                const hasPro = !!vizData.pro;
+
+                return (
+                    <div className="mt-4 border rounded-lg overflow-hidden dark:border-gray-700 bg-white dark:bg-gray-800/50">
+                        {visualizationMode === 'dual' && hasPro && (
+                            <div className="flex-shrink-0 border-b border-gray-200 dark:border-gray-700">
+                                <div className="flex items-center space-x-2 px-2">
+                                    <button
+                                        onClick={() => setActiveTab('lite')}
+                                        className={`flex items-center space-x-2 px-3 py-2 text-sm font-medium border-b-2 transition-colors ${
+                                            activeTab === 'lite'
+                                                ? 'border-purple-500 text-purple-600 dark:text-purple-400'
+                                                : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'
+                                        }`}
+                                    >
+                                        <span>Lite</span>
+                                        {vizData.lite?.loading && <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-purple-500"></div>}
+                                    </button>
+                                    <button
+                                        onClick={() => setActiveTab('pro')}
+                                        className={`flex items-center space-x-2 px-3 py-2 text-sm font-medium border-b-2 transition-colors ${
+                                            activeTab === 'pro'
+                                                ? 'border-green-500 text-green-600 dark:text-green-400'
+                                                : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'
+                                        }`}
+                                    >
+                                        <span>Pro</span>
+                                        {vizData.pro?.loading && <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-green-500"></div>}
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+                        <div className="relative p-2">
+                            {/* Render only the active tab to avoid overlay sizing issues */}
+                            {visualizationMode === 'dual' && hasPro ? (
+                                activeTab === 'lite' ? renderIframe(vizData.lite, liteRef) : renderIframe(vizData.pro, proRef)
+                            ) : (
+                                renderIframe(vizData.lite, liteRef)
+                            )}
+
+                            {/* removed manual fit button */}
+                        </div>
+                    </div>
+                );
             };
 
             const renderMessage = (message, index) => {
@@ -642,7 +770,7 @@
                                 {children}
                                 {typeof message.Payload === 'string' && message.Payload.trim() !== '' && (
                                     <button 
-                                        onClick={() => visualizeMessage(message.Payload)}
+                                        onClick={() => visualizeMessage(`${currentSessionId}-${index}`, message.Payload)}
                                         className="absolute top-0 right-0 -mt-1 -mr-1 p-1.5 rounded-full bg-gray-200 dark:bg-gray-700 text-gray-500 dark:text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-purple-500"
                                         title="Visualize this message"
                                     >
@@ -652,6 +780,7 @@
                                         </svg>
                                     </button>
                                 )}
+                                <InlineVisualization vizData={visualizationCache[`${currentSessionId}-${index}`]} isDarkMode={isDarkMode} />
                             </div>
                         </div>
                     </div>
@@ -1137,8 +1266,8 @@
                     <div className="flex items-center justify-between px-4 py-3 border-b dark:border-gray-700 flex-shrink-0">
                         <span className={`font-semibold ${isDarkMode? 'text-white':'text-gray-800'}`}>Prompt Library</span>
                         <button onClick={toggleDrawer} className={`p-1 rounded-full ${isDarkMode? 'text-gray-400 hover:bg-gray-700':'text-gray-500 hover:bg-gray-200'}`}>
-                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6">
-                              <path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" />
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6">
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
                             </svg>
                         </button>
                     </div>
@@ -1157,82 +1286,12 @@
                         ))}
                     </div>
                 </div>
-                {/* Visualization Modal */}
-                {showVisualize && (
-                    <div 
-                        className="fixed inset-0 bg-black/60 z-40 flex items-center justify-center animate-fade-in"
-                        onClick={() => setShowVisualize(false)}
-                    >
-                        <div 
-                            className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-11/12 max-w-7xl h-[85vh] flex flex-col p-4"
-                            onClick={(e) => e.stopPropagation()} // Prevent closing when clicking inside
-                        >
-                            <div className="flex-shrink-0 flex items-center justify-between pb-2 mb-2 border-b dark:border-gray-700">
-                                <h3 className="font-semibold text-lg">Visualization</h3>
-                                <button onClick={() => setShowVisualize(false)} className="p-1 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700">
-                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6">
-                                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                                    </svg>
-                                </button>
-                            </div>
-                            <div className="flex-1 flex flex-col overflow-hidden">
-                                <div className="flex-shrink-0 border-b border-gray-200 dark:border-gray-700">
-                                    <div className="flex items-center space-x-2">
-                                        <button 
-                                            onClick={() => setActiveVizTab('lite')}
-                                            className={`flex items-center space-x-2 px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-                                                activeVizTab === 'lite' 
-                                                    ? 'border-purple-500 text-purple-600 dark:text-purple-400' 
-                                                    : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'
-                                            }`}
-                                        >
-                                            <span>gemini-2.5-flash-lite</span>
-                                            {isVisualizing.lite && <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-purple-500"></div>}
-                                        </button>
-                                        {visualizationMode === 'dual' && (
-                                            <button 
-                                                onClick={() => setActiveVizTab('pro')}
-                                                className={`flex items-center space-x-2 px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-                                                    activeVizTab === 'pro' 
-                                                        ? 'border-green-500 text-green-600 dark:text-green-400' 
-                                                        : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'
-                                                }`}
-                                            >
-                                                <span>gemini-2.5-flash</span>
-                                                {isVisualizing.pro && <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-green-500"></div>}
-                                            </button>
-                                        )}
-                                    </div>
-                                </div>
-                                <div className="flex-1 overflow-auto relative">
-                                    <div className={`w-full h-full absolute inset-0 transition-opacity duration-300 ${activeVizTab === 'lite' ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
-                                        <iframe 
-                                            srcDoc={visualizeContent.lite}
-                                            className="w-full h-full border-0"
-                                            title="Lite Visualization"
-                                            sandbox="allow-scripts allow-forms"
-                                        ></iframe>
-                                    </div>
-                                    {visualizationMode === 'dual' && (
-                                        <div className={`w-full h-full absolute inset-0 transition-opacity duration-300 ${activeVizTab === 'pro' ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
-                                            <iframe 
-                                                srcDoc={visualizeContent.pro}
-                                                className="w-full h-full border-0"
-                                                title="Pro Visualization"
-                                                sandbox="allow-scripts allow-forms"
-                                            ></iframe>
-                                        </div>
-                                    )}
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                )}
                 </>
             );
         }
 
-        ReactDOM.render(<App />, document.getElementById('root'));
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
     </script>
 </body>
 </html> 
