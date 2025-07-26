@@ -28,13 +28,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/kubectl-ai/gollm"
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/agent"
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/api"
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/journal"
 	"github.com/GoogleCloudPlatform/kubectl-ai/pkg/ui"
 	"github.com/charmbracelet/glamour"
 	"golang.org/x/sync/errgroup"
-	"google.golang.org/genai"
 	"k8s.io/klog/v2"
 )
 
@@ -97,8 +97,9 @@ type HTMLUserInterface struct {
 	httpServer         *http.Server
 	httpServerListener net.Listener
 
-	sessions *agent.SessionManager
-	journal  journal.Recorder
+	sessions  *agent.SessionManager
+	journal   journal.Recorder
+	llmClient gollm.Client
 
 	// markdownRenderer is used by future server-side rendering needs (kept for now)
 	markdownRenderer *glamour.TermRenderer
@@ -112,12 +113,13 @@ type HTMLUserInterface struct {
 
 var _ ui.UI = &HTMLUserInterface{}
 
-func NewHTMLUserInterface(sessions *agent.SessionManager, listenAddress string, journal journal.Recorder) (*HTMLUserInterface, error) {
+func NewHTMLUserInterface(sessions *agent.SessionManager, listenAddress string, journal journal.Recorder, llmClient gollm.Client) (*HTMLUserInterface, error) {
 	mux := http.NewServeMux()
 
 	u := &HTMLUserInterface{
 		sessions:       sessions,
 		journal:        journal,
+		llmClient:      llmClient,
 		broadcasterMap: make(map[string]*Broadcaster),
 		promptGroups:   nil,
 	}
@@ -492,7 +494,7 @@ func (u *HTMLUserInterface) handleVisualize(w http.ResponseWriter, req *http.Req
 		modelName = "gemini-2.5-flash-lite"
 	}
 
-	html, err := generateUI(ctx, modelName, payload.Description)
+	html, err := u.generateUI(ctx, modelName, payload.Description)
 	if err != nil {
 		log.Error(err, "generating UI")
 		http.Error(w, "error generating UI", http.StatusInternalServerError)
@@ -512,22 +514,10 @@ func (u *HTMLUserInterface) handleGetPrompts(w http.ResponseWriter, req *http.Re
 	json.NewEncoder(w).Encode(prompts)
 }
 
-// generateUI calls the Gemini model with the appropriate prompt and returns the raw HTML.
-func generateUI(parentCtx context.Context, modelName string, userQuery string) (string, error) {
+// generateUI calls the LLM with the appropriate prompt and returns the raw HTML.
+func (u *HTMLUserInterface) generateUI(parentCtx context.Context, modelName string, userQuery string) (string, error) {
 	ctx, cancel := context.WithTimeout(parentCtx, 2*time.Minute)
 	defer cancel()
-
-	apiKey := os.Getenv("GEMINI_API_KEY")
-	if apiKey == "" {
-		return "", fmt.Errorf("GEMINI_API_KEY env var must be set")
-	}
-
-	client, err := genai.NewClient(ctx, &genai.ClientConfig{
-		APIKey: apiKey,
-	})
-	if err != nil {
-		return "", fmt.Errorf("genai.NewClient: %w", err)
-	}
 
 	prompt := fmt.Sprintf(`You are Flash Lite, an expert conversational AI specializing in UI generation.
 Your primary goal is to respond to the user's message by generating a self-contained HTML UI component.
@@ -540,15 +530,20 @@ User's message: "%s"
 
 Your response (HTML):`, userQuery)
 
-	resp, err := client.Models.GenerateContent(ctx, modelName, []*genai.Content{genai.NewContentFromText(prompt, "user")}, nil)
+	req := &gollm.CompletionRequest{
+		Model:  modelName,
+		Prompt: prompt,
+	}
+
+	resp, err := u.llmClient.GenerateCompletion(ctx, req)
 	if err != nil {
-		return "", fmt.Errorf("GenerateContent: %w", err)
+		return "", fmt.Errorf("GenerateCompletion: %w", err)
 	}
 
 	if resp == nil {
 		return "", fmt.Errorf("received nil response from model")
 	}
-	html := resp.Text()
+	html := resp.Response()
 
 	// Trim markdown fences.
 	html = strings.TrimSpace(html)

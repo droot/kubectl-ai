@@ -507,7 +507,7 @@ func RunRootCommand(ctx context.Context, opt Options, args []string) error {
 			}
 		}()
 
-		userInterface, err = html.NewHTMLUserInterface(sessionMgr, opt.UIListenAddress, recorder)
+		userInterface, err = html.NewHTMLUserInterface(sessionMgr, opt.UIListenAddress, recorder, llmClient)
 		if err != nil {
 			return fmt.Errorf("creating web UI: %w", err)
 		}
